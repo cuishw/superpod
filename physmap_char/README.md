@@ -76,6 +76,26 @@ sudo physmap_memtest write64 0x1000 0xdeadbeef12345678
 
 The tool maps a page-aligned window that covers the requested offset and size, so command offsets do not need to be page-aligned. The `read64` and `write64` commands require 8-byte-aligned offsets.
 
+## Muxi GPU read/write test tool
+
+`physmap_mc_memtest` uses the MUSA runtime (`mc_runtime.h`) to access a mapped physical range through the GPU/DMA path instead of CPU loads and stores. Build it on a Muxi SDK system with:
+
+```sh
+make musa
+sudo install -m 0755 physmap_mc_memtest /usr/local/sbin/physmap_mc_memtest
+```
+
+It defaults to GPU 0, `/dev/physmap0`, and `mcHostRegisterIoMemory` because physmap mappings usually represent I/O or physical memory.
+
+```sh
+sudo physmap_mc_memtest --gpu 0 /dev/physmap0 write 0x0 64 0xbb
+sudo physmap_mc_memtest --gpu 0 /dev/physmap0 read 0x0 64
+sudo physmap_mc_memtest --gpu 0 /dev/physmap0 write64 0x1000 0xdeadbeef12345678
+sudo physmap_mc_memtest --gpu 0 /dev/physmap0 read64 0x1000
+```
+
+Use `--register default` instead of the default `--register io` if the mapped range should be registered with `mcHostRegisterDefault`.
+
 ## List mappings
 
 ```sh
