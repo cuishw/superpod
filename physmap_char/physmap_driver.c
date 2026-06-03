@@ -219,6 +219,32 @@ err_clear:
 	return ret;
 }
 
+static void physmap_fill_list(struct physmap_list_req *req)
+{
+	struct physmap_region *region;
+	unsigned int id;
+
+	memset(req, 0, sizeof(*req));
+
+	mutex_lock(&regions_lock);
+	for (id = 0; id < PHYSMAP_MAX_MAPPINGS; id++) {
+		region = regions[id];
+		if (!region || !region->alive)
+			continue;
+
+		req->entries[req->count].phys_addr = region->phys_addr;
+		req->entries[req->count].size = region->size;
+		req->entries[req->count].cache_mode = region->cache_mode;
+		req->entries[req->count].id = region->id;
+		req->entries[req->count].ref_count = atomic_read(&region->refs);
+		snprintf(req->entries[req->count].dev_name,
+			 sizeof(req->entries[req->count].dev_name),
+			 "/dev/" PHYSMAP_DATA_NAME, region->id);
+		req->count++;
+	}
+	mutex_unlock(&regions_lock);
+}
+
 static int physmap_destroy_region(unsigned int id)
 {
 	struct physmap_region *region;
@@ -243,6 +269,7 @@ static long physmap_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long
 {
 	struct physmap_create_req create_req;
 	struct physmap_destroy_req destroy_req;
+	struct physmap_list_req *list_req;
 	int ret;
 
 	if (_IOC_TYPE(cmd) != PHYSMAP_IOC_MAGIC)
@@ -264,6 +291,16 @@ static long physmap_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long
 		if (copy_from_user(&destroy_req, (void __user *)arg, sizeof(destroy_req)))
 			return -EFAULT;
 		return physmap_destroy_region(destroy_req.id);
+	case PHYSMAP_IOC_LIST:
+		list_req = kzalloc(sizeof(*list_req), GFP_KERNEL);
+		if (!list_req)
+			return -ENOMEM;
+
+		physmap_fill_list(list_req);
+		ret = copy_to_user((void __user *)arg, list_req, sizeof(*list_req)) ?
+			-EFAULT : 0;
+		kfree(list_req);
+		return ret;
 	default:
 		return -ENOTTY;
 	}

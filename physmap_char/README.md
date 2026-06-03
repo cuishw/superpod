@@ -60,6 +60,21 @@ void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
 The mmap offset can be used to map a page-aligned subrange inside the configured physical range.
 
+## List mappings
+
+```sh
+sudo physmapctl list
+```
+
+Example output:
+
+```text
+ID   DEV              PHYS_ADDR          SIZE               END_ADDR           CACHE  REFS
+0    /dev/physmap0    0x0000000080000000 0x0000000000100000 0x00000000800fffff WC     1
+```
+
+The list command shows every currently configured character device, including mapping id, device path, physical base address, size, end address, cache mode, and active driver reference count.
+
 ## Destroy a mapping
 
 ```sh

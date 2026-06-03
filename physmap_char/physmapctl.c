@@ -20,9 +20,10 @@ static void usage(const char *prog)
 		"Usage:\n"
 		"  %s create <phys_addr> <size> [UC|WC|WB] [control_device]\n"
 		"  %s destroy <id> [control_device]\n"
+		"  %s list [control_device]\n"
 		"\n"
 		"Numbers accept decimal or 0x-prefixed hexadecimal, plus K/M/G/T/P suffixes. Cache mode defaults to WC.\n",
-		prog, prog);
+		prog, prog, prog);
 }
 
 static int scale_for_suffix(const char *suffix, uint64_t *scale)
@@ -96,6 +97,22 @@ static int parse_u32(const char *text, uint32_t *value)
 		return -1;
 	*value = (uint32_t)tmp;
 	return 0;
+}
+
+static const char *cache_mode_name(uint32_t mode)
+{
+	switch (mode) {
+	case PHYSMAP_CACHE_UC:
+		return "UC";
+	case PHYSMAP_CACHE_WC:
+		return "WC";
+	case PHYSMAP_CACHE_WB:
+		return "WB";
+	case PHYSMAP_CACHE_DEFAULT:
+		return "DEFAULT";
+	default:
+		return "UNKNOWN";
+	}
 }
 
 static int parse_cache_mode(const char *text, uint32_t *mode)
@@ -193,6 +210,49 @@ static int do_destroy(int argc, char **argv)
 	return 0;
 }
 
+static int do_list(int argc, char **argv)
+{
+	const char *ctl_path = argc >= 3 ? argv[2] : DEFAULT_CTL_DEV;
+	struct physmap_list_req req = { 0 };
+	uint32_t count;
+	uint32_t i;
+	uint64_t end_addr;
+	int fd;
+
+	if (argc > 3) {
+		usage(argv[0]);
+		return 2;
+	}
+
+	fd = open_control(ctl_path);
+	if (fd < 0)
+		return 1;
+	if (ioctl(fd, PHYSMAP_IOC_LIST, &req) < 0) {
+		fprintf(stderr, "PHYSMAP_IOC_LIST failed: %s\n", strerror(errno));
+		close(fd);
+		return 1;
+	}
+	close(fd);
+
+	count = req.count > PHYSMAP_MAX_MAPPINGS ? PHYSMAP_MAX_MAPPINGS : req.count;
+	printf("%-4s %-16s %-18s %-18s %-18s %-6s %-5s\n",
+	       "ID", "DEV", "PHYS_ADDR", "SIZE", "END_ADDR", "CACHE", "REFS");
+	for (i = 0; i < count; i++) {
+		end_addr = req.entries[i].size ?
+			req.entries[i].phys_addr + req.entries[i].size - 1 :
+			req.entries[i].phys_addr;
+		printf("%-4u %-16s 0x%016" PRIx64 " 0x%016" PRIx64
+		       " 0x%016" PRIx64 " %-6s %-5u\n",
+		       req.entries[i].id, req.entries[i].dev_name,
+		       (uint64_t)req.entries[i].phys_addr,
+		       (uint64_t)req.entries[i].size, end_addr,
+		       cache_mode_name(req.entries[i].cache_mode),
+		       req.entries[i].ref_count);
+	}
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
@@ -203,6 +263,8 @@ int main(int argc, char **argv)
 		return do_create(argc, argv);
 	if (!strcmp(argv[1], "destroy"))
 		return do_destroy(argc, argv);
+	if (!strcmp(argv[1], "list"))
+		return do_list(argc, argv);
 
 	usage(argv[0]);
 	return 2;
