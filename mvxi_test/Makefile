@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
-CC ?= cc
+CC = mxcc
 CFLAGS ?= -Wall -Wextra -O2
-LDLIBS ?= -ldl
+LDLIBS ?=
 
 .PHONY: all clean install
 
