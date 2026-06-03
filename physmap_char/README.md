@@ -75,17 +75,6 @@ sudo physmap_memtest write64 0x1000 0xdeadbeef12345678
 
 The tool maps a page-aligned window that covers the requested offset and size, so command offsets do not need to be page-aligned. The `read64` and `write64` commands require 8-byte-aligned offsets.
 
-## Test mmap read/write
-
-`physmapctl rwtest` opens one mapped character device, `mmap`s the range covering the requested operations, writes an incrementing byte pattern at one offset, flushes/fences posted writes, verifies the written bytes by reading them back, then reads bytes from another offset and prints a checksum plus a hex dump of up to 256 bytes. Use `0` for either size to skip that operation.
-
-```sh
-sudo physmapctl rwtest /dev/physmap0 0x0 4K 0x0 64
-sudo physmapctl rwtest /dev/physmap0 0x1000 256 0x1000 256 0x5a
-```
-
-Arguments are `<device> <write_offset> <write_size> <read_offset> <read_size> [pattern_byte]`. Offsets and sizes use the same numeric parser as `create`; `pattern_byte` defaults to `0xa5`. If the write verification reads back different bytes, the command reports the first mismatching offset and exits non-zero.
-
 ## List mappings
 
 ```sh
