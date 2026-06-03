@@ -18,7 +18,7 @@ static void usage(const char *prog)
 {
 	fprintf(stderr,
 		"Usage:\n"
-		"  %s create <phys_addr> <size> [UC|WC|WB] [control_device]\n"
+		"  %s create <identifier> <phys_addr> <size> [UC|WC|WB] [control_device]\n"
 		"  %s destroy <id> [control_device]\n"
 		"  %s list [control_device]\n"
 		"\n"
@@ -146,24 +146,30 @@ static int open_control(const char *path)
 
 static int do_create(int argc, char **argv)
 {
-	const char *ctl_path = argc >= 6 ? argv[5] : DEFAULT_CTL_DEV;
+	const char *ctl_path = argc >= 7 ? argv[6] : DEFAULT_CTL_DEV;
 	struct physmap_create_req req = { 0 };
 	uint64_t phys_addr;
 	uint64_t size;
 	int fd;
 
-	if (argc < 4 || argc > 6) {
+	if (argc < 5 || argc > 7) {
 		usage(argv[0]);
 		return 2;
 	}
-	if (parse_u64(argv[2], &phys_addr) || parse_u64(argv[3], &size)) {
+	if (!argv[2][0] || strlen(argv[2]) >= sizeof(req.identifier)) {
+		fprintf(stderr, "identifier must be 1-%zu bytes\n",
+			sizeof(req.identifier) - 1);
+		return 2;
+	}
+	if (parse_u64(argv[3], &phys_addr) || parse_u64(argv[4], &size)) {
 		fprintf(stderr, "invalid phys_addr or size\n");
 		return 2;
 	}
+	snprintf(req.identifier, sizeof(req.identifier), "%s", argv[2]);
 	req.phys_addr = phys_addr;
 	req.size = size;
-	if (parse_cache_mode(argc >= 5 ? argv[4] : NULL, &req.cache_mode)) {
-		fprintf(stderr, "invalid cache mode: %s\n", argv[4]);
+	if (parse_cache_mode(argc >= 6 ? argv[5] : NULL, &req.cache_mode)) {
+		fprintf(stderr, "invalid cache mode: %s\n", argv[5]);
 		return 2;
 	}
 
@@ -177,7 +183,7 @@ static int do_create(int argc, char **argv)
 	}
 	close(fd);
 
-	printf("id=%u\ndev=%s\n", req.id, req.dev_name);
+	printf("id=%u\nidentifier=%s\ndev=%s\n", req.id, req.identifier, req.dev_name);
 	return 0;
 }
 
@@ -235,16 +241,17 @@ static int do_list(int argc, char **argv)
 	close(fd);
 
 	count = req.count > PHYSMAP_MAX_MAPPINGS ? PHYSMAP_MAX_MAPPINGS : req.count;
-	printf("%-4s %-16s %-18s %-18s %-18s %-6s %-5s\n",
-	       "ID", "DEV", "PHYS_ADDR", "SIZE", "END_ADDR", "CACHE", "REFS");
+	printf("%-4s %-20s %-16s %-18s %-18s %-18s %-6s %-5s\n",
+	       "ID", "IDENTIFIER", "DEV", "PHYS_ADDR", "SIZE", "END_ADDR",
+	       "CACHE", "REFS");
 	for (i = 0; i < count; i++) {
 		end_addr = req.entries[i].size ?
 			req.entries[i].phys_addr + req.entries[i].size - 1 :
 			req.entries[i].phys_addr;
-		printf("%-4u %-16s 0x%016" PRIx64 " 0x%016" PRIx64
+		printf("%-4u %-20s %-16s 0x%016" PRIx64 " 0x%016" PRIx64
 		       " 0x%016" PRIx64 " %-6s %-5u\n",
-		       req.entries[i].id, req.entries[i].dev_name,
-		       (uint64_t)req.entries[i].phys_addr,
+		       req.entries[i].id, req.entries[i].identifier,
+		       req.entries[i].dev_name, (uint64_t)req.entries[i].phys_addr,
 		       (uint64_t)req.entries[i].size, end_addr,
 		       cache_mode_name(req.entries[i].cache_mode),
 		       req.entries[i].ref_count);

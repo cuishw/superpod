@@ -5,7 +5,7 @@
 ## What it does
 
 1. Loading the kernel module creates `/dev/physmap_ctl`.
-2. `physmapctl create <phys_addr> <size> [UC|WC|WB]` asks the driver to register a mapping.
+2. `physmapctl create <identifier> <phys_addr> <size> [UC|WC|WB]` asks the driver to register a uniquely identified mapping.
 3. The driver creates `/dev/physmapN` and returns that path to userspace.
 4. Other applications open `/dev/physmapN` and call `mmap(2)` to access the requested physical range.
 
@@ -32,25 +32,26 @@ sudo install -m 0755 physmap_memtest /usr/local/sbin/physmap_memtest
 ## Create a mapping
 
 ```sh
-sudo physmapctl create 0x80000000 0x100000
+sudo physmapctl create framebuffer0 0x80000000 0x100000
 ```
 
 Example output:
 
 ```text
 id=0
+identifier=framebuffer0
 dev=/dev/physmap0
 ```
 
 To select a cache mode explicitly:
 
 ```sh
-sudo physmapctl create 0x80000000 0x100000 UC
-sudo physmapctl create 0x80000000 0x100000 WC
-sudo physmapctl create 0x80000000 0x100000 WB
+sudo physmapctl create framebuffer_uc 0x80000000 0x100000 UC
+sudo physmapctl create framebuffer_wc 0x80000000 0x100000 WC
+sudo physmapctl create framebuffer_wb 0x80000000 0x100000 WB
 ```
 
-Both physical address and size must be page-aligned. Numeric values accept decimal or `0x`-prefixed hexadecimal input and optional binary size suffixes (`K`, `M`, `G`, `T`, `P`, with optional `B`/`iB`), so `64G` is accepted as 64 GiB.
+The identifier must be unique among active mappings. Both physical address and size must be page-aligned. Numeric values accept decimal or `0x`-prefixed hexadecimal input and optional binary size suffixes (`K`, `M`, `G`, `T`, `P`, with optional `B`/`iB`), so `64G` is accepted as 64 GiB.
 
 ## Use from another application
 
@@ -84,11 +85,11 @@ sudo physmapctl list
 Example output:
 
 ```text
-ID   DEV              PHYS_ADDR          SIZE               END_ADDR           CACHE  REFS
-0    /dev/physmap0    0x0000000080000000 0x0000000000100000 0x00000000800fffff WC     1
+ID   IDENTIFIER           DEV              PHYS_ADDR          SIZE               END_ADDR           CACHE  REFS
+0    framebuffer0         /dev/physmap0    0x0000000080000000 0x0000000000100000 0x00000000800fffff WC     1
 ```
 
-The list command shows every currently configured character device, including mapping id, device path, physical base address, size, end address, cache mode, and active driver reference count.
+The list command shows every currently configured character device, including mapping id, unique identifier, device path, physical base address, size, end address, cache mode, and active driver reference count.
 
 ## Destroy a mapping
 

@@ -6,6 +6,7 @@
 #include <linux/types.h>
 
 #define PHYSMAP_NAME_LEN 32
+#define PHYSMAP_IDENT_LEN 64
 #define PHYSMAP_MAX_MAPPINGS 64
 
 /* Users may omit the cache mode to get the driver default: WC. */
@@ -22,6 +23,7 @@ struct physmap_create_req {
 	__u32 cache_mode;
 	__u32 id;
 	char dev_name[PHYSMAP_NAME_LEN];
+	char identifier[PHYSMAP_IDENT_LEN];
 };
 
 struct physmap_destroy_req {
@@ -37,6 +39,7 @@ struct physmap_list_entry {
 	__u32 ref_count;
 	__u32 reserved;
 	char dev_name[PHYSMAP_NAME_LEN];
+	char identifier[PHYSMAP_IDENT_LEN];
 };
 
 struct physmap_list_req {

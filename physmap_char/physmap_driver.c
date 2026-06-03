@@ -11,6 +11,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
 
@@ -29,6 +30,7 @@ struct physmap_region {
 	phys_addr_t phys_addr;
 	resource_size_t size;
 	enum physmap_cache_mode cache_mode;
+	char identifier[PHYSMAP_IDENT_LEN];
 	unsigned int id;
 	bool alive;
 };
@@ -68,6 +70,19 @@ static bool physmap_valid_mode(__u32 mode)
 {
 	return mode == PHYSMAP_CACHE_DEFAULT || mode == PHYSMAP_CACHE_UC ||
 	       mode == PHYSMAP_CACHE_WC || mode == PHYSMAP_CACHE_WB;
+}
+
+static bool physmap_identifier_exists(const char *identifier)
+{
+	unsigned int id;
+
+	for (id = 0; id < PHYSMAP_MAX_MAPPINGS; id++) {
+		if (regions[id] && regions[id]->alive &&
+		    !strcmp(regions[id]->identifier, identifier))
+			return true;
+	}
+
+	return false;
 }
 
 static struct physmap_region *physmap_get_region(unsigned int id)
@@ -157,8 +172,12 @@ static int physmap_create_region(struct physmap_create_req *req)
 	unsigned int id;
 	dev_t devt;
 	phys_addr_t end;
+	size_t identifier_len;
 	int ret;
 
+	identifier_len = strnlen(req->identifier, sizeof(req->identifier));
+	if (!identifier_len || identifier_len == sizeof(req->identifier))
+		return -EINVAL;
 	if (!req->size || !physmap_valid_mode(req->cache_mode))
 		return -EINVAL;
 	if (!IS_ALIGNED(req->phys_addr, PAGE_SIZE) ||
@@ -173,6 +192,11 @@ static int physmap_create_region(struct physmap_create_req *req)
 		return -ENOMEM;
 
 	mutex_lock(&regions_lock);
+	if (physmap_identifier_exists(req->identifier)) {
+		mutex_unlock(&regions_lock);
+		kfree(region);
+		return -EEXIST;
+	}
 	id = find_first_zero_bit(id_bitmap, PHYSMAP_MAX_MAPPINGS);
 	if (id >= PHYSMAP_MAX_MAPPINGS) {
 		mutex_unlock(&regions_lock);
@@ -187,6 +211,7 @@ static int physmap_create_region(struct physmap_create_req *req)
 	region->size = (resource_size_t)req->size;
 	region->cache_mode = req->cache_mode == PHYSMAP_CACHE_DEFAULT ?
 		PHYSMAP_CACHE_WC : req->cache_mode;
+	strscpy(region->identifier, req->identifier, sizeof(region->identifier));
 	regions[id] = region;
 	mutex_unlock(&regions_lock);
 
@@ -240,6 +265,8 @@ static void physmap_fill_list(struct physmap_list_req *req)
 		snprintf(req->entries[req->count].dev_name,
 			 sizeof(req->entries[req->count].dev_name),
 			 "/dev/" PHYSMAP_DATA_NAME, region->id);
+		strscpy(req->entries[req->count].identifier, region->identifier,
+			sizeof(req->entries[req->count].identifier));
 		req->count++;
 	}
 	mutex_unlock(&regions_lock);
