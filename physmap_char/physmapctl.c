@@ -148,6 +148,30 @@ static void fill_pattern(volatile uint8_t *dst, uint64_t size, uint8_t seed)
 		dst[i] = (uint8_t)(seed + i);
 }
 
+static uint64_t verify_pattern(const volatile uint8_t *src, uint64_t size,
+				       uint8_t seed, uint64_t *first_bad,
+				       uint8_t *expected, uint8_t *actual)
+{
+	uint64_t i;
+	uint64_t mismatches = 0;
+
+	for (i = 0; i < size; i++) {
+		uint8_t want = (uint8_t)(seed + i);
+		uint8_t got = src[i];
+
+		if (got == want)
+			continue;
+		if (!mismatches) {
+			*first_bad = i;
+			*expected = want;
+			*actual = got;
+		}
+		mismatches++;
+	}
+
+	return mismatches;
+}
+
 static uint32_t read_checksum(const volatile uint8_t *src, uint64_t size)
 {
 	uint64_t i;
@@ -157,6 +181,14 @@ static uint32_t read_checksum(const volatile uint8_t *src, uint64_t size)
 		checksum = (checksum << 5) - checksum + src[i];
 
 	return checksum;
+}
+
+static void flush_mapping_writes(void *mapping, uint64_t map_size)
+{
+	__sync_synchronize();
+	if (msync(mapping, (size_t)map_size, MS_SYNC) && errno != EINVAL)
+		fprintf(stderr, "warning: msync failed: %s\n", strerror(errno));
+	__sync_synchronize();
 }
 
 static void dump_bytes(const volatile uint8_t *src, uint64_t size)
@@ -349,7 +381,12 @@ static int do_rwtest(int argc, char **argv)
 	uint8_t pattern = 0xa5;
 	void *mapping;
 	volatile uint8_t *base;
+	uint64_t first_bad;
+	uint64_t mismatches;
+	uint8_t expected;
+	uint8_t actual;
 	uint32_t checksum;
+	int ret = 0;
 	int fd;
 
 	if (argc < 7 || argc > 8) {
@@ -411,10 +448,27 @@ static int do_rwtest(int argc, char **argv)
 
 	base = (volatile uint8_t *)mapping;
 	if (write_size) {
-		fill_pattern(base + (write_offset - map_offset), write_size, pattern);
+		volatile uint8_t *write_ptr = base + (write_offset - map_offset);
+
+		fill_pattern(write_ptr, write_size, pattern);
+		flush_mapping_writes(mapping, map_size);
 		printf("wrote %" PRIu64 " bytes at offset 0x%" PRIx64
 		       " using pattern seed 0x%02x\n",
 		       write_size, write_offset, pattern);
+
+		mismatches = verify_pattern(write_ptr, write_size, pattern, &first_bad,
+					    &expected, &actual);
+		if (mismatches) {
+			fprintf(stderr,
+				"write verify failed: %" PRIu64 " mismatches, "
+				"first at offset 0x%" PRIx64
+				" expected=0x%02x actual=0x%02x\n",
+				mismatches, write_offset + first_bad, expected, actual);
+			ret = 1;
+		} else {
+			printf("write verify passed for %" PRIu64 " bytes at offset 0x%"
+			       PRIx64 "\n", write_size, write_offset);
+		}
 	}
 	if (read_size) {
 		checksum = read_checksum(base + (read_offset - map_offset), read_size);
@@ -426,7 +480,7 @@ static int do_rwtest(int argc, char **argv)
 
 	munmap(mapping, map_size);
 	close(fd);
-	return 0;
+	return ret;
 }
 
 int main(int argc, char **argv)
