@@ -25,4 +25,4 @@ Options:
 - `--reserve-mib <MiB>`: leave this much reported free memory unallocated. The default is `0`, so the tool attempts to allocate all currently free GPU memory.
 - `--min-chunk-mib <MiB>`: smallest allocation chunk to keep trying after large allocations fail. The default is `1` MiB.
 
-Allocated chunks are filled with `0xbb`, synchronized with `mcDeviceSynchronize()`, reported, then freed before the program exits.
+Allocated chunks are filled with `0xbb` and synchronized with `mcDeviceSynchronize()`. The process then stays alive with the GPU memory allocated until you press Enter; after that it copies the allocations back to host memory, verifies every byte is still `0xbb`, reports pass/fail, and frees the memory before exiting.

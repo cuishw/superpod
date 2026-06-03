@@ -9,6 +9,7 @@
 
 #define DEFAULT_MIN_CHUNK_MIB 1ULL
 #define DEFAULT_PATTERN 0xbb
+#define VERIFY_CHUNK_BYTES (64ULL << 20)
 
 #define CHECK_MC(call)                                                       \
 	do {                                                                     \
@@ -131,6 +132,76 @@ static void free_allocations(struct allocation *allocs, size_t count)
 		CHECK_MC(mcFree(allocs[i].ptr));
 }
 
+
+static void wait_for_user(int gpu)
+{
+	char line[32];
+
+	printf("GPU%d: memory is allocated and filled. Press Enter to verify and free...\n",
+	       gpu);
+	fflush(stdout);
+	if (!fgets(line, sizeof(line), stdin))
+		printf("GPU%d: stdin closed, continuing with verification\n", gpu);
+}
+
+static int verify_allocation(int gpu, const struct allocation *alloc,
+			     uint8_t *host_buf, size_t host_buf_size)
+{
+	size_t offset = 0;
+
+	while (offset < alloc->size) {
+		size_t todo = alloc->size - offset;
+
+		if (todo > host_buf_size)
+			todo = host_buf_size;
+		CHECK_MC(mcMemcpy(host_buf, (const char *)alloc->ptr + offset, todo,
+				  mcMemcpyDeviceToHost));
+		for (size_t i = 0; i < todo; i++) {
+			if (host_buf[i] == DEFAULT_PATTERN)
+				continue;
+			fprintf(stderr,
+				"GPU%d: verify failed at allocation offset %zu "
+				"expected=0x%02x actual=0x%02x\n",
+				gpu, offset + i, DEFAULT_PATTERN, host_buf[i]);
+			return -1;
+		}
+		offset += todo;
+	}
+
+	return 0;
+}
+
+static int verify_allocations(int gpu, const struct allocation *allocs,
+			      size_t count)
+{
+	uint8_t *host_buf;
+	size_t host_buf_size = VERIFY_CHUNK_BYTES;
+
+	if (!count)
+		return 0;
+	host_buf = malloc(host_buf_size);
+	while (!host_buf && host_buf_size > (1ULL << 20)) {
+		host_buf_size /= 2;
+		host_buf = malloc(host_buf_size);
+	}
+	if (!host_buf) {
+		fprintf(stderr, "GPU%d: failed to allocate host verification buffer: %s\n",
+			gpu, strerror(errno));
+		return -1;
+	}
+
+	for (size_t i = 0; i < count; i++) {
+		if (verify_allocation(gpu, &allocs[i], host_buf, host_buf_size)) {
+			free(host_buf);
+			return -1;
+		}
+	}
+
+	free(host_buf);
+	printf("GPU%d: verification passed for %zu allocations\n", gpu, count);
+	return 0;
+}
+
 static int allocate_and_fill_chunk(struct allocation **allocs, size_t *count,
 				   size_t *capacity, size_t chunk,
 				   size_t *allocated)
@@ -205,6 +276,10 @@ static int test_one_gpu(int gpu, const struct options *opt)
 	if (allocated < target)
 		printf("GPU%d %s: remaining_unallocated=%zu MiB min_chunk=%zu MiB\n",
 		       gpu, prop.name, (target - allocated) >> 20, min_chunk >> 20);
+
+	wait_for_user(gpu);
+	if (verify_allocations(gpu, allocs, count))
+		rc = -1;
 
 	free_allocations(allocs, count);
 	free(allocs);
