@@ -12,6 +12,7 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 
 #include "physmap_ioctl.h"
 
@@ -39,6 +40,15 @@ static struct physmap_region *regions[PHYSMAP_MAX_MAPPINGS];
 static DECLARE_BITMAP(id_bitmap, PHYSMAP_MAX_MAPPINGS);
 static struct cdev ctl_cdev;
 static struct device *ctl_device;
+
+static struct class *physmap_class_create(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	return class_create("physmap");
+#else
+	return class_create(THIS_MODULE, "physmap");
+#endif
+}
 
 static pgprot_t physmap_pgprot(pgprot_t prot, enum physmap_cache_mode mode)
 {
@@ -276,7 +286,7 @@ static int __init physmap_init(void)
 	if (ret)
 		return ret;
 
-	physmap_class = class_create("physmap");
+	physmap_class = physmap_class_create();
 	if (IS_ERR(physmap_class)) {
 		ret = PTR_ERR(physmap_class);
 		goto err_unregister;
