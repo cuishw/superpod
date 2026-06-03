@@ -49,7 +49,7 @@ sudo physmapctl create 0x80000000 0x100000 WC
 sudo physmapctl create 0x80000000 0x100000 WB
 ```
 
-Both physical address and size must be page-aligned.
+Both physical address and size must be page-aligned. Numeric values accept decimal or `0x`-prefixed hexadecimal input and optional binary size suffixes (`K`, `M`, `G`, `T`, `P`, with optional `B`/`iB`), so `64G` is accepted as 64 GiB.
 
 ## Use from another application
 
