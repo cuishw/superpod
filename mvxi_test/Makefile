@@ -7,7 +7,7 @@ LDLIBS ?=
 
 all: mvxi_test
 
-mvxi_test: mvxi_test.c
+mvxi_test: data_validation.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
 
 clean:
