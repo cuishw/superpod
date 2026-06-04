@@ -4,7 +4,7 @@ CONF=${1:-/etc/metax.conf}
 SIZE=${2:-64G}
 CMD=./physmapctl
 
-while read -r host_id gpu_id local bdf bar rest; do
+while read -r host_id gpu_id local bdf bar rest || [[ -n "$host_id$gpu_id$local$bdf$bar$rest" ]]; do
     # 跳过空行、注释行、表头行
     [[ -z "$host_id" ]] && continue
     [[ "$host_id" =~ ^# ]] && continue
