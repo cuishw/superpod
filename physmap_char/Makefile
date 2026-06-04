@@ -19,12 +19,12 @@ userspace: physmapctl physmap_memtest
 physmapctl: physmapctl.c physmap_ioctl.h
 	$(CC) $(CFLAGS) -o $@ physmapctl.c
 
-physmap_memtest: physmap_memtest.c
+physmap_memtest: physmap_memtest.c physmap_ioctl.h
 	$(CC) $(CFLAGS) -o $@ physmap_memtest.c
 
 musa: physmap_mc_memtest
 
-physmap_mc_memtest: physmap_mc_memtest.c
+physmap_mc_memtest: physmap_mc_memtest.c physmap_ioctl.h
 	$(MXCC) $(CFLAGS) -o $@ physmap_mc_memtest.c
 
 clean:

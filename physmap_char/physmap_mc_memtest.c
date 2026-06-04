@@ -11,9 +11,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "physmap_ioctl.h"
+
+#define DEFAULT_CTL_DEV "/dev/physmap_ctl"
 #define DEFAULT_DEV_PATH "/dev/physmap0"
 #define DEFAULT_PAGE_SIZE 4096UL
 
@@ -46,9 +50,61 @@ static void usage(const char *prog)
 		"  %s [--gpu ID] [--register io|default] [device] read64  <offset>\n"
 		"  %s [--gpu ID] [--register io|default] [device] write64 <offset> <u64_value>\n"
 		"\n"
-		"If device is omitted, %s is used. The default registration flag is io\n"
-		"(mcHostRegisterIoMemory), intended for mmap'ed physical/BAR memory.\n",
-		prog, prog, prog, prog, DEFAULT_DEV_PATH);
+		"If device is omitted, %s is used. Device may be a full /dev/... path\n"
+		"or a physmap IDENTIFIER resolved through %s. The default registration\n"
+		"flag is io (mcHostRegisterIoMemory), intended for mmap'ed physical/BAR memory.\n",
+		prog, prog, prog, prog, DEFAULT_DEV_PATH, DEFAULT_CTL_DEV);
+}
+
+static int is_command(const char *arg)
+{
+	return !strcmp(arg, "read") || !strcmp(arg, "write") ||
+	       !strcmp(arg, "read64") || !strcmp(arg, "write64");
+}
+
+static const char *resolve_dev_path(const char *device, char *path_buf,
+				    size_t path_buf_len)
+{
+	struct physmap_list_req req = { 0 };
+	uint32_t count;
+	int fd;
+
+	if (!device || !*device)
+		return DEFAULT_DEV_PATH;
+	if (device[0] == '/')
+		return device;
+
+	fd = open(DEFAULT_CTL_DEV, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "open %s failed while resolving identifier %s: %s\n",
+			DEFAULT_CTL_DEV, device, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+	if (ioctl(fd, PHYSMAP_IOC_LIST, &req) < 0) {
+		fprintf(stderr, "PHYSMAP_IOC_LIST failed while resolving identifier %s: %s\n",
+			device, strerror(errno));
+		close(fd);
+		exit(EXIT_FAILURE);
+	}
+	close(fd);
+
+	count = req.count > PHYSMAP_MAX_MAPPINGS ? PHYSMAP_MAX_MAPPINGS : req.count;
+	for (uint32_t i = 0; i < count; i++) {
+		if (!strcmp(req.entries[i].identifier, device)) {
+			int written = snprintf(path_buf, path_buf_len, "%s",
+					       req.entries[i].dev_name);
+
+			if (written < 0 || (size_t)written >= path_buf_len) {
+				fprintf(stderr, "device path for identifier %s is too long\n",
+					device);
+				exit(EXIT_FAILURE);
+			}
+			return path_buf;
+		}
+	}
+
+	fprintf(stderr, "identifier not found: %s\n", device);
+	exit(EXIT_FAILURE);
 }
 
 static int scale_for_suffix(const char *suffix, uint64_t *scale)
@@ -396,7 +452,9 @@ static void parse_options(int argc, char **argv, struct options *opt, int *argi)
 int main(int argc, char **argv)
 {
 	struct options opt;
-	const char *dev_path = DEFAULT_DEV_PATH;
+	const char *dev_arg = NULL;
+	const char *dev_path;
+	char dev_path_buf[PATH_MAX];
 	const char *cmd;
 	int argi;
 	int fd;
@@ -407,13 +465,19 @@ int main(int argc, char **argv)
 	}
 
 	parse_options(argc, argv, &opt, &argi);
-	if (argi < argc && argv[argi][0] == '/')
-		dev_path = argv[argi++];
+	if (argi < argc && !is_command(argv[argi]))
+		dev_arg = argv[argi++];
 	if (argi >= argc) {
 		usage(argv[0]);
 		return EXIT_FAILURE;
 	}
 	cmd = argv[argi++];
+	if (!is_command(cmd)) {
+		fprintf(stderr, "Unknown command: %s\n", cmd);
+		usage(argv[0]);
+		return EXIT_FAILURE;
+	}
+	dev_path = resolve_dev_path(dev_arg, dev_path_buf, sizeof(dev_path_buf));
 
 	CHECK_MC(mcSetDevice(opt.gpu));
 	fd = open(dev_path, O_RDWR | O_SYNC | O_CLOEXEC);
