@@ -1,6 +1,6 @@
-# mvxi_test
+# data_validation
 
-`mvxi_test` is a standalone Muxi/MUSA GPU memory fill utility. It uses the MUSA runtime API from `mc_runtime.h`, allocates as much free GPU memory as possible, and writes byte pattern `0xbb` to every allocated byte.
+`data_validation` is a standalone Muxi/MUSA GPU memory fill utility. It uses the MUSA runtime API from `mc_runtime.h`, allocates as much free GPU memory as possible, and writes byte pattern `0xbb` to every allocated byte.
 
 ## Build
 
@@ -13,9 +13,9 @@ The default compiler is `mxcc`.
 ## Usage
 
 ```sh
-./mvxi_test --all
-./mvxi_test --gpu 0
-./mvxi_test --gpu 0 --reserve-mib 256 --min-chunk-mib 4
+./data_validation --all
+./data_validation --gpu 0
+./data_validation --gpu 0 --reserve-mib 256 --min-chunk-mib 4
 ```
 
 Options:

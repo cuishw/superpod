@@ -5,13 +5,13 @@ LDLIBS ?=
 
 .PHONY: all clean install
 
-all: mvxi_test
+all: data_validation
 
-mvxi_test: mvxi_test.c
+data_validation: data_validation.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
 
 clean:
-	$(RM) mvxi_test
+	$(RM) data_validation
 
-install: mvxi_test
-	install -m 0755 mvxi_test /usr/local/bin/mvxi_test
+install: data_validation
+	install -m 0755 data_validation /usr/local/bin/data_validation
