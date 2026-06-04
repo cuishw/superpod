@@ -64,11 +64,12 @@ The mmap offset can be used to map a page-aligned subrange inside the configured
 
 ## Standalone memory read/write test tool
 
-`physmap_memtest` is a separate mmap test utility modeled after simple reserved-memory test programs. It defaults to `/dev/physmap0`, or you can pass another mapped character device as the first argument.
+`physmap_memtest` is a separate mmap test utility modeled after simple reserved-memory test programs. It defaults to `/dev/physmap0`, or you can pass another mapped character device as the first argument. The device argument accepts either a full `/dev/...` path or a physmap `IDENTIFIER`, which is resolved through `/dev/physmap_ctl`.
 
 ```sh
 sudo physmap_memtest read 0x0 64
 sudo physmap_memtest /dev/physmap1 read 0x1000 256
+sudo physmap_memtest h0-0 read 0x1000 256
 sudo physmap_memtest write 0x0 64 0x5a
 sudo physmap_memtest read64 0x1000
 sudo physmap_memtest write64 0x1000 0xdeadbeef12345678
@@ -85,11 +86,12 @@ make musa
 sudo install -m 0755 physmap_mc_memtest /usr/local/sbin/physmap_mc_memtest
 ```
 
-It defaults to GPU 0, `/dev/physmap0`, and `mcHostRegisterIoMemory` because physmap mappings usually represent I/O or physical memory.
+It defaults to GPU 0, `/dev/physmap0`, and `mcHostRegisterIoMemory` because physmap mappings usually represent I/O or physical memory. Like `physmap_memtest`, its device argument accepts either a full `/dev/...` path or a physmap `IDENTIFIER` resolved through `/dev/physmap_ctl`.
 
 ```sh
 sudo physmap_mc_memtest --gpu 0 /dev/physmap0 write 0x0 64 0xbb
 sudo physmap_mc_memtest --gpu 0 /dev/physmap0 read 0x0 64
+sudo physmap_mc_memtest --gpu 0 h0-0 read 0x0 64
 sudo physmap_mc_memtest --gpu 0 /dev/physmap0 write64 0x1000 0xdeadbeef12345678
 sudo physmap_mc_memtest --gpu 0 /dev/physmap0 read64 0x1000
 ```
