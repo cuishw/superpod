@@ -8,7 +8,7 @@ MUSA_HOME ?= /usr/local/musa
 MUSA_CPPFLAGS ?= -I$(MUSA_HOME)/include
 MUSA_LIBDIR ?= $(MUSA_HOME)/lib
 MUSA_LDFLAGS ?= -L$(MUSA_LIBDIR)
-MUSA_LDLIBS ?= -lmusart
+MUSA_LDLIBS ?= -ldl
 
 obj-m += physmap_driver.o
 
@@ -33,7 +33,8 @@ physmap_mc_memtest: physmap_mc_memtest.c physmap_ioctl.h
 	$(MXCC) $(CFLAGS) -o $@ physmap_mc_memtest.c
 
 physmap_mc_bwtest.o: physmap_mc_bwtest.c physmap_ioctl.h
-	$(MXCC) $(CFLAGS) $(MUSA_CPPFLAGS) -c -o $@ physmap_mc_bwtest.c
+	$(MXCC) $(CFLAGS) $(MUSA_CPPFLAGS) \
+		-DDEFAULT_MUSA_LIBDIR=\"$(MUSA_LIBDIR)\" -c -o $@ physmap_mc_bwtest.c
 
 physmap_mc_bwtest: physmap_mc_bwtest.o
 	$(CC) $(CFLAGS) -o $@ physmap_mc_bwtest.o \

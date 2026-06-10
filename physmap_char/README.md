@@ -100,11 +100,11 @@ Use `--register default` instead of the default `--register io` if the mapped ra
 
 ## Muxi GPU bandwidth test tool
 
-`physmap_mc_bwtest` measures GPU access bandwidth to a mapped character device. It maps the requested range, registers it as `mcHostRegisterIoMemory`, validates the GPU write/read path by writing the selected byte value and reading it back, then measures GPU read bandwidth first and GPU write bandwidth second. The bandwidth tool uses only the MUSA runtime API, so its Makefile target compiles with `mxcc` to pick up the SDK include paths, then links the object with the host C compiler plus `-lmusart`; this avoids the `mxcc` link step that may require a host `libstdc++` installation.
+`physmap_mc_bwtest` measures GPU access bandwidth to a mapped character device. It maps the requested range, registers it as `mcHostRegisterIoMemory`, validates the GPU write/read path by writing the selected byte value and reading it back, then measures GPU read bandwidth first and GPU write bandwidth second. The bandwidth tool uses only the MUSA runtime API, so its Makefile target compiles with `mxcc` to pick up the SDK include paths, then links the object with the host C compiler plus `-ldl`; at runtime it loads `libmusart.so` with `dlopen`. This avoids both the `mxcc` link step that may require a host `libstdc++` installation and a build-time `-lmusart` search-path dependency.
 
 ```sh
 make musa
-# If libmusart is installed outside /usr/local/musa/lib, override MUSA_HOME or MUSA_LIBDIR.
+# If libmusart is installed outside the dynamic loader paths or MUSA_LIBDIR, set PHYSMAP_MC_RUNTIME=/path/to/libmusart.so when running.
 sudo physmap_mc_bwtest --gpu 0 --size 64 --offset 0 --iters 100 --value 0xa5 /dev/physmap0
 sudo physmap_mc_bwtest --gpu 1 --size 256 --offset 0x100000 --iters 50 h0-0
 ```

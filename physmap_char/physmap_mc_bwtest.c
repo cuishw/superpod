@@ -3,6 +3,7 @@
 
 #include <mc_runtime.h>
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -24,6 +25,10 @@
 #define DEFAULT_SIZE_MB 64ULL
 #define DEFAULT_ITERS 100ULL
 #define DEFAULT_WRITE_VALUE 0xa5U
+#ifndef DEFAULT_MUSA_LIBDIR
+#define DEFAULT_MUSA_LIBDIR "/usr/local/musa/lib"
+#endif
+#define DEFAULT_MC_RUNTIME_ENV "PHYSMAP_MC_RUNTIME"
 
 #define CHECK_MC(call)                                                       \
 	do {                                                                     \
@@ -42,6 +47,100 @@ struct options {
 	uint8_t write_value;
 	int gpu;
 };
+
+struct mc_runtime_api {
+	void *handle;
+	const char *(*mcGetErrorString)(mcError_t error);
+	mcError_t (*mcSetDevice)(int device);
+	mcError_t (*mcHostRegister)(void *ptr, size_t size, unsigned int flags);
+	mcError_t (*mcHostUnregister)(void *ptr);
+	mcError_t (*mcMalloc)(void **dev_ptr, size_t size);
+	mcError_t (*mcFree)(void *dev_ptr);
+	mcError_t (*mcMemset)(void *dev_ptr, int value, size_t count);
+	mcError_t (*mcMemcpy)(void *dst, const void *src, size_t count,
+			    int kind);
+	mcError_t (*mcDeviceSynchronize)(void);
+};
+
+static struct mc_runtime_api mc_api;
+
+static void load_mc_symbol(void *handle, void *fn_ptr, const char *name)
+{
+	dlerror();
+	*(void **)fn_ptr = dlsym(handle, name);
+	if (!*(void **)fn_ptr) {
+		const char *err = dlerror();
+
+		fprintf(stderr, "dlsym %s failed: %s\n", name,
+			err ? err : "symbol not found");
+		exit(EXIT_FAILURE);
+	}
+}
+
+static void load_mc_runtime(void)
+{
+	const char *env_path = getenv(DEFAULT_MC_RUNTIME_ENV);
+	char default_path[PATH_MAX];
+	char default_path_v1[PATH_MAX];
+	char default_path_v0[PATH_MAX];
+	const char *candidates[10];
+	int idx = 0;
+	const char *last_error = NULL;
+
+	if (mc_api.handle)
+		return;
+
+	if (env_path && *env_path)
+		candidates[idx++] = env_path;
+	candidates[idx++] = "libmusart.so";
+	candidates[idx++] = "libmusart.so.1";
+	candidates[idx++] = "libmusart.so.0";
+	if (snprintf(default_path, sizeof(default_path), "%s/libmusart.so",
+		     DEFAULT_MUSA_LIBDIR) < (int)sizeof(default_path))
+		candidates[idx++] = default_path;
+	if (snprintf(default_path_v1, sizeof(default_path_v1), "%s/libmusart.so.1",
+		     DEFAULT_MUSA_LIBDIR) < (int)sizeof(default_path_v1))
+		candidates[idx++] = default_path_v1;
+	if (snprintf(default_path_v0, sizeof(default_path_v0), "%s/libmusart.so.0",
+		     DEFAULT_MUSA_LIBDIR) < (int)sizeof(default_path_v0))
+		candidates[idx++] = default_path_v0;
+	candidates[idx] = NULL;
+
+	for (int i = 0; candidates[i]; i++) {
+		mc_api.handle = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
+		if (mc_api.handle)
+			break;
+		last_error = dlerror();
+	}
+	if (!mc_api.handle) {
+		fprintf(stderr,
+			"failed to load MUSA runtime library. Set %s to the full libmusart.so path. Last error: %s\n",
+			DEFAULT_MC_RUNTIME_ENV,
+			last_error ? last_error : "unknown dlopen error");
+		exit(EXIT_FAILURE);
+	}
+
+	load_mc_symbol(mc_api.handle, &mc_api.mcGetErrorString, "mcGetErrorString");
+	load_mc_symbol(mc_api.handle, &mc_api.mcSetDevice, "mcSetDevice");
+	load_mc_symbol(mc_api.handle, &mc_api.mcHostRegister, "mcHostRegister");
+	load_mc_symbol(mc_api.handle, &mc_api.mcHostUnregister, "mcHostUnregister");
+	load_mc_symbol(mc_api.handle, &mc_api.mcMalloc, "mcMalloc");
+	load_mc_symbol(mc_api.handle, &mc_api.mcFree, "mcFree");
+	load_mc_symbol(mc_api.handle, &mc_api.mcMemset, "mcMemset");
+	load_mc_symbol(mc_api.handle, &mc_api.mcMemcpy, "mcMemcpy");
+	load_mc_symbol(mc_api.handle, &mc_api.mcDeviceSynchronize,
+		       "mcDeviceSynchronize");
+}
+
+#define mcGetErrorString mc_api.mcGetErrorString
+#define mcSetDevice mc_api.mcSetDevice
+#define mcHostRegister mc_api.mcHostRegister
+#define mcHostUnregister mc_api.mcHostUnregister
+#define mcMalloc mc_api.mcMalloc
+#define mcFree mc_api.mcFree
+#define mcMemset mc_api.mcMemset
+#define mcMemcpy mc_api.mcMemcpy
+#define mcDeviceSynchronize mc_api.mcDeviceSynchronize
 
 static void usage(const char *prog)
 {
@@ -446,6 +545,7 @@ int main(int argc, char **argv)
 	parse_options(argc, argv, &opt, &dev_arg);
 	dev_path = resolve_dev_path(dev_arg, dev_path_buf, sizeof(dev_path_buf));
 
+	load_mc_runtime();
 	CHECK_MC(mcSetDevice(opt.gpu));
 	fd = open(dev_path, O_RDWR | O_SYNC | O_CLOEXEC);
 	if (fd < 0) {
