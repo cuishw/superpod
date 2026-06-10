@@ -32,17 +32,11 @@ musa: physmap_mc_memtest physmap_mc_bwtest
 physmap_mc_memtest: physmap_mc_memtest.c physmap_ioctl.h
 	$(MXCC) $(CFLAGS) -o $@ physmap_mc_memtest.c
 
-physmap_mc_bwtest.o: physmap_mc_bwtest.c physmap_ioctl.h
-	$(MXCC) $(CFLAGS) $(MUSA_CPPFLAGS) \
-		-DDEFAULT_MUSA_LIBDIR=\"$(MUSA_LIBDIR)\" -c -o $@ physmap_mc_bwtest.c
-
-physmap_mc_bwtest: physmap_mc_bwtest.o
-	$(CC) $(CFLAGS) -o $@ physmap_mc_bwtest.o \
-		$(MUSA_LDFLAGS) $(MUSA_LDLIBS)
+physmap_mc_bwtest: physmap_mc_bwtest.c
+	$(MXCC) $(CFLAGS) -o $@ physmap_mc_bwtest.c
 
 clean:
-	$(RM) physmapctl physmap_memtest physmap_mc_memtest physmap_mc_bwtest \
-		physmap_mc_bwtest.o
+	$(RM) physmapctl physmap_memtest physmap_mc_memtest physmap_mc_bwtest
 	@if [ -d "$(KDIR)" ]; then \
 		$(MAKE) -C $(KDIR) M=$(PWD) clean; \
 	else \

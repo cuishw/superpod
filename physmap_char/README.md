@@ -100,21 +100,25 @@ Use `--register default` instead of the default `--register io` if the mapped ra
 
 ## Muxi GPU bandwidth test tool
 
-`physmap_mc_bwtest` measures GPU access bandwidth to a mapped character device. It maps the requested range, registers it as `mcHostRegisterIoMemory`, validates the GPU write/read path by writing the selected byte value and reading it back, then measures GPU read bandwidth first and GPU write bandwidth second. The bandwidth tool uses only the MUSA runtime API, so its Makefile target compiles with `mxcc` to pick up the SDK include paths, then links the object with the host C compiler plus `-ldl`; at runtime it loads `libmusart.so` with `dlopen`. This avoids both the `mxcc` link step that may require a host `libstdc++` installation and a build-time `-lmusart` search-path dependency.
+`physmap_mc_bwtest` measures MUSA DMA bandwidth for host memory that is either allocated by `mcMallocHost` or mapped with `mmap` and registered with `mcHostRegister`. For physmap character devices, use `--host mmap-register --mode file --path /dev/physmapN --io`. The tool validates GPU write/read consistency with the selected byte value before measuring bandwidth, then reports read bandwidth first and write bandwidth second.
 
 ```sh
 make musa
-# If libmusart is installed outside the dynamic loader paths or MUSA_LIBDIR, set PHYSMAP_MC_RUNTIME=/path/to/libmusart.so when running.
-sudo physmap_mc_bwtest --gpu 0 --size 64 --offset 0 --iters 100 --value 0xa5 /dev/physmap0
-sudo physmap_mc_bwtest --gpu 1 --size 256 --offset 0x100000 --iters 50 h0-0
+sudo physmap_mc_bwtest --host mmap-register --mode file --path /dev/physmap0 --size 64 --offset 0 --iters 100 --gpu 0 --io --value 0xa5
+sudo physmap_mc_bwtest --host mmap-register --mode file --path /sys/bus/pci/devices/0000:86:00.0/resource2 --size 1024 --offset 2G --iters 100 --gpu 0 --io
+sudo physmap_mc_bwtest --host malloc-host --size 1024 --iters 100 --gpu 0
 ```
 
 Options:
 
-* `--size MB`: transfer size in MiB, default `64`.
-* `--offset BYTES`: device offset, default `0`; accepts decimal, `0x` hexadecimal, and binary suffixes such as `4K` or `1G`.
+* `--host mmap-register|malloc-host`: use `mmap + mcHostRegister` (default) or `mcMallocHost` pinned memory.
+* `--mode anon|file`: for `mmap-register`, map anonymous memory (default) or a file/BAR/device path.
+* `--path PATH`: file/BAR/device path required by `--mode file`.
+* `--size MB`: transfer size in MiB, default `1024`.
+* `--offset BYTES`: page-aligned mmap offset for `--mode file`, default `0`; accepts decimal, `0x` hexadecimal, and binary suffixes such as `4K` or `2G`.
 * `--iters N`: read and write iterations, default `100`.
 * `--gpu ID`: GPU device id, default `0`.
+* `--io`: register mapped memory with `mcHostRegisterIoMemory` instead of `mcHostRegisterDefault`.
 * `--value BYTE` / `--data BYTE`: byte value used for validation and write-bandwidth traffic, default `0xa5`.
 
 ## List mappings

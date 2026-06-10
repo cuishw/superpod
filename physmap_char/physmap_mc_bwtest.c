@@ -3,7 +3,7 @@
 
 #include <mc_runtime.h>
 
-#include <dlfcn.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -12,583 +12,486 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-#include "physmap_ioctl.h"
-
-#define DEFAULT_CTL_DEV "/dev/physmap_ctl"
-#define DEFAULT_DEV_PATH "/dev/physmap0"
-#define DEFAULT_PAGE_SIZE 4096UL
-#define DEFAULT_SIZE_MB 64ULL
-#define DEFAULT_ITERS 100ULL
+#define DEFAULT_SIZE_MB 1024ULL
+#define DEFAULT_ITERS 100
 #define DEFAULT_WRITE_VALUE 0xa5U
-#ifndef DEFAULT_MUSA_LIBDIR
-#define DEFAULT_MUSA_LIBDIR "/usr/local/musa/lib"
-#endif
-#define DEFAULT_MC_RUNTIME_ENV "PHYSMAP_MC_RUNTIME"
 
 #define CHECK_MC(call)                                                       \
 	do {                                                                     \
-		mcError_t err__ = (call);                                           \
-		if (err__ != mcSuccess) {                                          \
+		mcError_t err = (call);                                             \
+		if (err != mcSuccess) {                                            \
 			fprintf(stderr, "MC error %s:%d: %s\n", __FILE__, __LINE__,  \
-				mcGetErrorString(err__));                                \
+				mcGetErrorString(err));                                  \
 			exit(EXIT_FAILURE);                                        \
 		}                                                                  \
 	} while (0)
 
+#define CHECK_SYS(cond, msg)                                                 \
+	do {                                                                     \
+		if (cond) {                                                        \
+			fprintf(stderr, "%s failed: %s\n", msg, strerror(errno));    \
+			exit(EXIT_FAILURE);                                        \
+		}                                                                  \
+	} while (0)
+
+enum map_mode {
+	MODE_ANON,
+	MODE_FILE,
+};
+
+enum host_mode {
+	HOST_MMAP_REGISTER,
+	HOST_MALLOC_HOST,
+};
+
 struct options {
-	uint64_t size;
-	uint64_t offset;
-	uint64_t iters;
+	enum map_mode mode;
+	enum host_mode host;
+	const char *path;
+	size_t size_mb;
+	uint64_t offset_bytes;
+	int iterations;
+	int device;
+	int use_io_memory;
 	uint8_t write_value;
-	int gpu;
 };
 
-struct mc_runtime_api {
-	void *handle;
-	const char *(*mcGetErrorString)(mcError_t error);
-	mcError_t (*mcSetDevice)(int device);
-	mcError_t (*mcHostRegister)(void *ptr, size_t size, unsigned int flags);
-	mcError_t (*mcHostUnregister)(void *ptr);
-	mcError_t (*mcMalloc)(void **dev_ptr, size_t size);
-	mcError_t (*mcFree)(void *dev_ptr);
-	mcError_t (*mcMemset)(void *dev_ptr, int value, size_t count);
-	mcError_t (*mcMemcpy)(void *dst, const void *src, size_t count,
-			    int kind);
-	mcError_t (*mcDeviceSynchronize)(void);
-};
-
-static struct mc_runtime_api mc_api;
-
-static void load_mc_symbol(void *handle, void *fn_ptr, const char *name)
+static uint64_t parse_size_value(const char *s, const char *name)
 {
-	dlerror();
-	*(void **)fn_ptr = dlsym(handle, name);
-	if (!*(void **)fn_ptr) {
-		const char *err = dlerror();
+	char *end = NULL;
+	uint64_t value;
 
-		fprintf(stderr, "dlsym %s failed: %s\n", name,
-			err ? err : "symbol not found");
+	errno = 0;
+	value = strtoull(s, &end, 0);
+	if (errno != 0 || end == s) {
+		fprintf(stderr, "ERROR: invalid %s: %s\n", name, s);
 		exit(EXIT_FAILURE);
 	}
-}
 
-static void load_mc_runtime(void)
-{
-	const char *env_path = getenv(DEFAULT_MC_RUNTIME_ENV);
-	char default_path[PATH_MAX];
-	char default_path_v1[PATH_MAX];
-	char default_path_v0[PATH_MAX];
-	const char *candidates[10];
-	int idx = 0;
-	const char *last_error = NULL;
+	while (*end != '\0' && isspace((unsigned char)*end))
+		end++;
 
-	if (mc_api.handle)
-		return;
+	if (*end != '\0') {
+		char suffix = (char)tolower((unsigned char)*end++);
 
-	if (env_path && *env_path)
-		candidates[idx++] = env_path;
-	candidates[idx++] = "libmusart.so";
-	candidates[idx++] = "libmusart.so.1";
-	candidates[idx++] = "libmusart.so.0";
-	if (snprintf(default_path, sizeof(default_path), "%s/libmusart.so",
-		     DEFAULT_MUSA_LIBDIR) < (int)sizeof(default_path))
-		candidates[idx++] = default_path;
-	if (snprintf(default_path_v1, sizeof(default_path_v1), "%s/libmusart.so.1",
-		     DEFAULT_MUSA_LIBDIR) < (int)sizeof(default_path_v1))
-		candidates[idx++] = default_path_v1;
-	if (snprintf(default_path_v0, sizeof(default_path_v0), "%s/libmusart.so.0",
-		     DEFAULT_MUSA_LIBDIR) < (int)sizeof(default_path_v0))
-		candidates[idx++] = default_path_v0;
-	candidates[idx] = NULL;
+		if (*end == 'i' || *end == 'I')
+			end++;
+		if (*end == 'b' || *end == 'B')
+			end++;
 
-	for (int i = 0; candidates[i]; i++) {
-		mc_api.handle = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
-		if (mc_api.handle)
+		while (*end != '\0' && isspace((unsigned char)*end))
+			end++;
+
+		if (*end != '\0') {
+			fprintf(stderr, "ERROR: invalid %s suffix: %s\n", name, s);
+			exit(EXIT_FAILURE);
+		}
+
+		switch (suffix) {
+		case 'k':
+			value *= 1024ULL;
 			break;
-		last_error = dlerror();
-	}
-	if (!mc_api.handle) {
-		fprintf(stderr,
-			"failed to load MUSA runtime library. Set %s to the full libmusart.so path. Last error: %s\n",
-			DEFAULT_MC_RUNTIME_ENV,
-			last_error ? last_error : "unknown dlopen error");
-		exit(EXIT_FAILURE);
-	}
-
-	load_mc_symbol(mc_api.handle, &mc_api.mcGetErrorString, "mcGetErrorString");
-	load_mc_symbol(mc_api.handle, &mc_api.mcSetDevice, "mcSetDevice");
-	load_mc_symbol(mc_api.handle, &mc_api.mcHostRegister, "mcHostRegister");
-	load_mc_symbol(mc_api.handle, &mc_api.mcHostUnregister, "mcHostUnregister");
-	load_mc_symbol(mc_api.handle, &mc_api.mcMalloc, "mcMalloc");
-	load_mc_symbol(mc_api.handle, &mc_api.mcFree, "mcFree");
-	load_mc_symbol(mc_api.handle, &mc_api.mcMemset, "mcMemset");
-	load_mc_symbol(mc_api.handle, &mc_api.mcMemcpy, "mcMemcpy");
-	load_mc_symbol(mc_api.handle, &mc_api.mcDeviceSynchronize,
-		       "mcDeviceSynchronize");
-}
-
-#define mcGetErrorString mc_api.mcGetErrorString
-#define mcSetDevice mc_api.mcSetDevice
-#define mcHostRegister mc_api.mcHostRegister
-#define mcHostUnregister mc_api.mcHostUnregister
-#define mcMalloc mc_api.mcMalloc
-#define mcFree mc_api.mcFree
-#define mcMemset mc_api.mcMemset
-#define mcMemcpy mc_api.mcMemcpy
-#define mcDeviceSynchronize mc_api.mcDeviceSynchronize
-
-static void usage(const char *prog)
-{
-	fprintf(stderr,
-		"Usage:\n"
-		"  %s [--size MB] [--offset BYTES] [--iters N] [--gpu ID] "
-		"[--value BYTE|--data BYTE] [device]\n"
-		"\n"
-		"Defaults: --size %llu, --offset 0, --iters %llu, --gpu 0, "
-		"--value/--data 0x%02x, device %s.\n"
-		"Device may be a full /dev/... path or a physmap IDENTIFIER resolved "
-		"through %s.\n"
-		"--size is in MiB; --offset accepts decimal, 0x-prefixed hexadecimal, "
-		"and K/M/G/T/P binary suffixes.\n",
-		prog, (unsigned long long)DEFAULT_SIZE_MB,
-		(unsigned long long)DEFAULT_ITERS, DEFAULT_WRITE_VALUE,
-		DEFAULT_DEV_PATH, DEFAULT_CTL_DEV);
-}
-
-static const char *resolve_dev_path(const char *device, char *path_buf,
-				    size_t path_buf_len)
-{
-	struct physmap_list_req req = { 0 };
-	uint32_t count;
-	int fd;
-
-	if (!device || !*device)
-		return DEFAULT_DEV_PATH;
-	if (device[0] == '/')
-		return device;
-
-	fd = open(DEFAULT_CTL_DEV, O_RDWR | O_CLOEXEC);
-	if (fd < 0) {
-		fprintf(stderr, "open %s failed while resolving identifier %s: %s\n",
-			DEFAULT_CTL_DEV, device, strerror(errno));
-		exit(EXIT_FAILURE);
-	}
-	if (ioctl(fd, PHYSMAP_IOC_LIST, &req) < 0) {
-		fprintf(stderr, "PHYSMAP_IOC_LIST failed while resolving identifier %s: %s\n",
-			device, strerror(errno));
-		close(fd);
-		exit(EXIT_FAILURE);
-	}
-	close(fd);
-
-	count = req.count > PHYSMAP_MAX_MAPPINGS ? PHYSMAP_MAX_MAPPINGS : req.count;
-	for (uint32_t i = 0; i < count; i++) {
-		if (!strcmp(req.entries[i].identifier, device)) {
-			int written = snprintf(path_buf, path_buf_len, "%s",
-					       req.entries[i].dev_name);
-
-			if (written < 0 || (size_t)written >= path_buf_len) {
-				fprintf(stderr, "device path for identifier %s is too long\n",
-					device);
-				exit(EXIT_FAILURE);
-			}
-			return path_buf;
+		case 'm':
+			value *= 1024ULL * 1024ULL;
+			break;
+		case 'g':
+			value *= 1024ULL * 1024ULL * 1024ULL;
+			break;
+		case 't':
+			value *= 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+			break;
+		default:
+			fprintf(stderr, "ERROR: invalid %s suffix: %s\n", name, s);
+			exit(EXIT_FAILURE);
 		}
 	}
 
-	fprintf(stderr, "identifier not found: %s\n", device);
-	exit(EXIT_FAILURE);
+	return value;
 }
 
-static int scale_for_suffix(const char *suffix, uint64_t *scale)
+static uint8_t parse_u8_value(const char *s, const char *name)
 {
-	char unit;
-
-	if (!suffix || !*suffix) {
-		*scale = 1;
-		return 0;
-	}
-
-	unit = suffix[0];
-	if (suffix[1] == 'i' || suffix[1] == 'I') {
-		if (suffix[2] && (suffix[2] != 'b' && suffix[2] != 'B'))
-			return -1;
-		if (suffix[2] && suffix[3])
-			return -1;
-	} else if (suffix[1] && (suffix[1] != 'b' && suffix[1] != 'B')) {
-		return -1;
-	} else if (suffix[1] && suffix[2]) {
-		return -1;
-	}
-
-	switch (unit) {
-	case 'k':
-	case 'K':
-		*scale = 1024ULL;
-		return 0;
-	case 'm':
-	case 'M':
-		*scale = 1024ULL * 1024ULL;
-		return 0;
-	case 'g':
-	case 'G':
-		*scale = 1024ULL * 1024ULL * 1024ULL;
-		return 0;
-	case 't':
-	case 'T':
-		*scale = 1024ULL * 1024ULL * 1024ULL * 1024ULL;
-		return 0;
-	case 'p':
-	case 'P':
-		*scale = 1024ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
-		return 0;
-	default:
-		return -1;
-	}
-}
-
-static uint64_t parse_u64_arg(const char *text, const char *name)
-{
-	char *end = NULL;
-	uint64_t base;
-	uint64_t scale;
-
-	errno = 0;
-	base = strtoull(text, &end, 0);
-	if (errno || end == text || scale_for_suffix(end, &scale) ||
-	    base > UINT64_MAX / scale) {
-		fprintf(stderr, "Invalid %s: %s\n", name, text);
-		exit(EXIT_FAILURE);
-	}
-
-	return base * scale;
-}
-
-static uint8_t parse_u8_arg(const char *text, const char *name)
-{
-	uint64_t value = parse_u64_arg(text, name);
+	uint64_t value = parse_size_value(s, name);
 
 	if (value > UINT8_MAX) {
-		fprintf(stderr, "%s must be <= 0xff\n", name);
+		fprintf(stderr, "ERROR: %s must be <= 0xff\n", name);
 		exit(EXIT_FAILURE);
 	}
 
 	return (uint8_t)value;
 }
 
-static int add_overflows_u64(uint64_t a, uint64_t b, uint64_t *result)
+static void usage(const char *prog)
 {
-	if (a > UINT64_MAX - b)
-		return 1;
-	*result = a + b;
-	return 0;
+	printf("Usage:\n");
+	printf("  %s [--host mmap-register|malloc-host] [--mode anon|file] [--path PATH]\n",
+	       prog);
+	printf("     [--size MB] [--offset BYTES] [--iters N] [--gpu ID] [--io]\n");
+	printf("     [--value BYTE|--data BYTE]\n");
+	printf("\n");
+
+	printf("Host memory modes:\n");
+	printf("  --host mmap-register   mmap + mcHostRegister, default\n");
+	printf("  --host malloc-host     mcMallocHost pinned memory\n");
+	printf("\n");
+
+	printf("Options:\n");
+	printf("  --size MB             buffer size in MiB, default %llu\n",
+	       (unsigned long long)DEFAULT_SIZE_MB);
+	printf("  --offset BYTES        mmap offset inside file/BAR resource, default 0\n");
+	printf("                        accepts decimal, hex, or suffix K/M/G/T, e.g. 0x200000000 or 2G\n");
+	printf("                        file/BAR mmap offset must be page aligned\n");
+	printf("  --iters N             iterations, default %d\n", DEFAULT_ITERS);
+	printf("  --gpu ID              GPU id, default 0\n");
+	printf("  --io                  use mcHostRegisterIoMemory for mmap-register\n");
+	printf("  --value BYTE          byte value used for validation and write bandwidth, default 0x%02x\n",
+	       DEFAULT_WRITE_VALUE);
+	printf("\n");
+
+	printf("Examples:\n");
+	printf("  %s --host mmap-register --mode anon --size 1024 --iters 100\n",
+	       prog);
+	printf("  %s --host malloc-host --size 1024 --iters 100\n", prog);
+	printf("  %s --host mmap-register --mode file --path /sys/bus/pci/devices/0000:86:00.0/resource2 --size 1024 --offset 2G --iters 100 --io\n",
+	       prog);
 }
 
-static long get_page_size(void)
+static void parse_args(int argc, char **argv, struct options *opt)
 {
-	long page_size = sysconf(_SC_PAGESIZE);
-
-	return page_size > 0 ? page_size : (long)DEFAULT_PAGE_SIZE;
-}
-
-static uint64_t page_align_down(uint64_t value, uint64_t page_size)
-{
-	return (value / page_size) * page_size;
-}
-
-static uint64_t page_align_up(uint64_t value, uint64_t page_size)
-{
-	uint64_t rounded;
-
-	if (add_overflows_u64(value, page_size - 1, &rounded) || rounded > SIZE_MAX) {
-		fprintf(stderr, "mapping size is too large\n");
-		exit(EXIT_FAILURE);
-	}
-
-	return (rounded / page_size) * page_size;
-}
-
-static void *map_physmem(int fd, uint64_t target_offset, uint64_t access_size,
-			 uint64_t *map_offset_out, uint64_t *map_size_out,
-			 uint64_t *offset_in_map_out)
-{
-	uint64_t page_size = (uint64_t)get_page_size();
-	uint64_t map_offset;
-	uint64_t offset_in_map;
-	uint64_t map_span;
-	uint64_t map_size;
-	void *map_addr;
-
-	if (!access_size) {
-		fprintf(stderr, "access size must be > 0\n");
-		exit(EXIT_FAILURE);
-	}
-	if (access_size > SIZE_MAX) {
-		fprintf(stderr, "access size is too large\n");
-		exit(EXIT_FAILURE);
-	}
-	if (add_overflows_u64(target_offset, access_size, &map_span)) {
-		fprintf(stderr, "target offset plus access size overflows\n");
-		exit(EXIT_FAILURE);
-	}
-
-	map_offset = page_align_down(target_offset, page_size);
-	offset_in_map = target_offset - map_offset;
-	if (add_overflows_u64(offset_in_map, access_size, &map_span)) {
-		fprintf(stderr, "mmap span overflows\n");
-		exit(EXIT_FAILURE);
-	}
-	map_size = page_align_up(map_span, page_size);
-
-	map_addr = mmap(NULL, (size_t)map_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-			fd, (off_t)map_offset);
-	if (map_addr == MAP_FAILED) {
-		fprintf(stderr,
-			"mmap failed: %s map_offset=0x%" PRIx64
-			" map_size=0x%" PRIx64 " target_offset=0x%" PRIx64
-			" access_size=0x%" PRIx64 "\n",
-			strerror(errno), map_offset, map_size, target_offset, access_size);
-		exit(EXIT_FAILURE);
-	}
-
-	*map_offset_out = map_offset;
-	*map_size_out = map_size;
-	*offset_in_map_out = offset_in_map;
-	return map_addr;
-}
-
-static double monotonic_seconds(void)
-{
-	struct timespec ts;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
-		fprintf(stderr, "clock_gettime failed: %s\n", strerror(errno));
-		exit(EXIT_FAILURE);
-	}
-
-	return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
-}
-
-static void validate_gpu_access(void *map_addr, uint64_t offset_in_map,
-				uint64_t size, uint8_t value)
-{
-	uint8_t *host = NULL;
-	void *d_write = NULL;
-	void *d_read = NULL;
-
-	host = malloc((size_t)size);
-	if (!host) {
-		fprintf(stderr, "malloc failed: %s\n", strerror(errno));
-		exit(EXIT_FAILURE);
-	}
-
-	CHECK_MC(mcMalloc(&d_write, (size_t)size));
-	CHECK_MC(mcMalloc(&d_read, (size_t)size));
-	CHECK_MC(mcMemset(d_write, value, (size_t)size));
-	CHECK_MC(mcMemcpy((uint8_t *)map_addr + offset_in_map, d_write, (size_t)size,
-			mcMemcpyDeviceToHost));
-	CHECK_MC(mcMemcpy(d_read, (uint8_t *)map_addr + offset_in_map, (size_t)size,
-			mcMemcpyHostToDevice));
-	CHECK_MC(mcMemcpy(host, d_read, (size_t)size, mcMemcpyDeviceToHost));
-	CHECK_MC(mcDeviceSynchronize());
-
-	for (uint64_t i = 0; i < size; i++) {
-		if (host[i] != value) {
-			fprintf(stderr,
-				"validation failed at byte %" PRIu64 ": read 0x%02x, expected 0x%02x\n",
-				i, host[i], value);
-			exit(EXIT_FAILURE);
-		}
-	}
-
-	CHECK_MC(mcFree(d_read));
-	CHECK_MC(mcFree(d_write));
-	free(host);
-	printf("Validation passed: GPU write/read data matched 0x%02x over %" PRIu64
-	       " bytes.\n", value, size);
-}
-
-static double run_read_bandwidth(void *map_addr, uint64_t offset_in_map,
-				 uint64_t size, uint64_t iters)
-{
-	void *d_buf = NULL;
-	double start;
-	double elapsed;
-
-	CHECK_MC(mcMalloc(&d_buf, (size_t)size));
-	CHECK_MC(mcMemcpy(d_buf, (uint8_t *)map_addr + offset_in_map, (size_t)size,
-			mcMemcpyHostToDevice));
-	CHECK_MC(mcDeviceSynchronize());
-
-	start = monotonic_seconds();
-	for (uint64_t i = 0; i < iters; i++)
-		CHECK_MC(mcMemcpy(d_buf, (uint8_t *)map_addr + offset_in_map, (size_t)size,
-				mcMemcpyHostToDevice));
-	CHECK_MC(mcDeviceSynchronize());
-	elapsed = monotonic_seconds() - start;
-
-	CHECK_MC(mcFree(d_buf));
-	return elapsed;
-}
-
-static double run_write_bandwidth(void *map_addr, uint64_t offset_in_map,
-				  uint64_t size, uint64_t iters, uint8_t value)
-{
-	void *d_buf = NULL;
-	double start;
-	double elapsed;
-
-	CHECK_MC(mcMalloc(&d_buf, (size_t)size));
-	CHECK_MC(mcMemset(d_buf, value, (size_t)size));
-	CHECK_MC(mcDeviceSynchronize());
-
-	start = monotonic_seconds();
-	for (uint64_t i = 0; i < iters; i++)
-		CHECK_MC(mcMemcpy((uint8_t *)map_addr + offset_in_map, d_buf, (size_t)size,
-				mcMemcpyDeviceToHost));
-	CHECK_MC(mcDeviceSynchronize());
-	elapsed = monotonic_seconds() - start;
-
-	CHECK_MC(mcFree(d_buf));
-	return elapsed;
-}
-
-static void parse_options(int argc, char **argv, struct options *opt,
-			  const char **dev_arg)
-{
-	opt->size = DEFAULT_SIZE_MB * 1024ULL * 1024ULL;
-	opt->offset = 0;
-	opt->iters = DEFAULT_ITERS;
+	opt->mode = MODE_ANON;
+	opt->host = HOST_MMAP_REGISTER;
+	opt->path = NULL;
+	opt->size_mb = DEFAULT_SIZE_MB;
+	opt->offset_bytes = 0;
+	opt->iterations = DEFAULT_ITERS;
+	opt->device = 0;
+	opt->use_io_memory = 0;
 	opt->write_value = DEFAULT_WRITE_VALUE;
-	opt->gpu = 0;
-	*dev_arg = NULL;
 
 	for (int i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "--size") && i + 1 < argc) {
-			uint64_t size_mb = parse_u64_arg(argv[++i], "size");
-
-			if (size_mb > UINT64_MAX / (1024ULL * 1024ULL)) {
-				fprintf(stderr, "size is too large\n");
+		if (!strcmp(argv[i], "--host") && i + 1 < argc) {
+			i++;
+			if (!strcmp(argv[i], "mmap-register"))
+				opt->host = HOST_MMAP_REGISTER;
+			else if (!strcmp(argv[i], "malloc-host"))
+				opt->host = HOST_MALLOC_HOST;
+			else {
+				usage(argv[0]);
 				exit(EXIT_FAILURE);
 			}
-			opt->size = size_mb * 1024ULL * 1024ULL;
+		} else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
+			i++;
+			if (!strcmp(argv[i], "anon"))
+				opt->mode = MODE_ANON;
+			else if (!strcmp(argv[i], "file"))
+				opt->mode = MODE_FILE;
+			else {
+				usage(argv[0]);
+				exit(EXIT_FAILURE);
+			}
+		} else if (!strcmp(argv[i], "--path") && i + 1 < argc) {
+			opt->path = argv[++i];
+		} else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
+			opt->size_mb = (size_t)parse_size_value(argv[++i], "--size");
 		} else if (!strcmp(argv[i], "--offset") && i + 1 < argc) {
-			opt->offset = parse_u64_arg(argv[++i], "offset");
+			opt->offset_bytes = parse_size_value(argv[++i], "--offset");
 		} else if (!strcmp(argv[i], "--iters") && i + 1 < argc) {
-			opt->iters = parse_u64_arg(argv[++i], "iters");
+			opt->iterations = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--gpu") && i + 1 < argc) {
-			uint64_t gpu = parse_u64_arg(argv[++i], "gpu");
-
-			if (gpu > INT_MAX) {
-				fprintf(stderr, "gpu is too large\n");
-				exit(EXIT_FAILURE);
-			}
-			opt->gpu = (int)gpu;
+			opt->device = atoi(argv[++i]);
+		} else if (!strcmp(argv[i], "--io")) {
+			opt->use_io_memory = 1;
 		} else if ((!strcmp(argv[i], "--value") || !strcmp(argv[i], "--data")) &&
 			   i + 1 < argc) {
-			opt->write_value = parse_u8_arg(argv[++i], "value");
+			opt->write_value = parse_u8_value(argv[++i], "--value");
 		} else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
 			usage(argv[0]);
 			exit(EXIT_SUCCESS);
-		} else if (argv[i][0] == '-') {
-			fprintf(stderr, "Unknown option: %s\n", argv[i]);
-			usage(argv[0]);
-			exit(EXIT_FAILURE);
-		} else if (!*dev_arg) {
-			*dev_arg = argv[i];
 		} else {
-			fprintf(stderr, "Unexpected argument: %s\n", argv[i]);
 			usage(argv[0]);
 			exit(EXIT_FAILURE);
 		}
 	}
 
-	if (!opt->size) {
-		fprintf(stderr, "size must be > 0\n");
+	if (opt->size_mb == 0) {
+		fprintf(stderr, "ERROR: --size must be > 0\n");
 		exit(EXIT_FAILURE);
 	}
-	if (!opt->iters) {
-		fprintf(stderr, "iters must be > 0\n");
+	if (opt->iterations <= 0) {
+		fprintf(stderr, "ERROR: --iters must be > 0\n");
 		exit(EXIT_FAILURE);
+	}
+
+	if (opt->host == HOST_MALLOC_HOST) {
+		if (opt->path != NULL || opt->use_io_memory || opt->offset_bytes != 0) {
+			fprintf(stderr,
+				"ERROR: --host malloc-host does not use --path, --offset or --io\n");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	if (opt->host == HOST_MMAP_REGISTER && opt->mode == MODE_ANON &&
+	    opt->offset_bytes != 0) {
+		fprintf(stderr, "ERROR: --offset is only valid with --mode file\n");
+		exit(EXIT_FAILURE);
+	}
+
+	if (opt->host == HOST_MMAP_REGISTER && opt->mode == MODE_FILE &&
+	    opt->path == NULL) {
+		fprintf(stderr, "ERROR: --mode file requires --path\n");
+		exit(EXIT_FAILURE);
+	}
+
+	if (opt->host == HOST_MMAP_REGISTER && opt->mode == MODE_FILE) {
+		long page_size = sysconf(_SC_PAGE_SIZE);
+
+		if (page_size <= 0)
+			page_size = 4096;
+
+		if ((opt->offset_bytes % (uint64_t)page_size) != 0) {
+			fprintf(stderr,
+				"ERROR: --offset must be page aligned, page size is %ld bytes\n",
+				page_size);
+			exit(EXIT_FAILURE);
+		}
 	}
 }
 
-static double bandwidth_gib_per_second(uint64_t size, uint64_t iters,
-					      double seconds)
+static const char *host_mode_name(enum host_mode host)
 {
-	long double bytes = (long double)size * (long double)iters;
+	switch (host) {
+	case HOST_MMAP_REGISTER:
+		return "mmap + mcHostRegister";
+	case HOST_MALLOC_HOST:
+		return "mcMallocHost";
+	default:
+		return "unknown";
+	}
+}
 
-	if (seconds <= 0.0)
+static const char *map_mode_name(enum map_mode mode)
+{
+	switch (mode) {
+	case MODE_ANON:
+		return "anonymous mmap";
+	case MODE_FILE:
+		return "file/BAR mmap";
+	default:
+		return "unknown";
+	}
+}
+
+static double bytes_to_gb(uint64_t bytes)
+{
+	return (double)bytes / 1000.0 / 1000.0 / 1000.0;
+}
+
+static void *mmap_host_buffer(const struct options *opt, size_t size, int *fd_out)
+{
+	void *addr = NULL;
+	int fd = -1;
+
+	if (opt->mode == MODE_ANON) {
+		addr = mmap(NULL, size, PROT_READ | PROT_WRITE,
+			    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		CHECK_SYS(addr == MAP_FAILED, "mmap anonymous");
+	} else {
+		fd = open(opt->path, O_RDWR | O_SYNC);
+		CHECK_SYS(fd < 0, "open");
+
+		if (opt->offset_bytes > (uint64_t)LLONG_MAX) {
+			fprintf(stderr, "ERROR: --offset is too large for off_t: 0x%llx\n",
+				(unsigned long long)opt->offset_bytes);
+			exit(EXIT_FAILURE);
+		}
+
+		addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+			    (off_t)opt->offset_bytes);
+		CHECK_SYS(addr == MAP_FAILED, "mmap file/BAR");
+	}
+
+	*fd_out = fd;
+	return addr;
+}
+
+static void touch_buffer(uint8_t *buf, size_t size, uint8_t value)
+{
+	const size_t page = 4096;
+
+	for (size_t off = 0; off < size; off += page)
+		buf[off] = (uint8_t)(value + off);
+
+	if (size > 0)
+		buf[size - 1] = value;
+}
+
+static void *alloc_host_buffer(const struct options *opt, size_t size, int *fd_out)
+{
+	void *h_buf = NULL;
+	*fd_out = -1;
+
+	if (opt->host == HOST_MALLOC_HOST) {
+		CHECK_MC(mcMallocHost(&h_buf, size));
+		touch_buffer((uint8_t *)h_buf, size, opt->write_value);
+		return h_buf;
+	}
+
+	h_buf = mmap_host_buffer(opt, size, fd_out);
+	if (opt->mode == MODE_ANON)
+		touch_buffer((uint8_t *)h_buf, size, opt->write_value);
+
+	unsigned int reg_flags = mcHostRegisterDefault;
+
+	if (opt->use_io_memory)
+		reg_flags = mcHostRegisterIoMemory;
+
+	CHECK_MC(mcHostRegister(h_buf, size, reg_flags));
+	return h_buf;
+}
+
+static void free_host_buffer(const struct options *opt, void *h_buf, size_t size,
+			     int fd)
+{
+	if (h_buf == NULL)
+		return;
+
+	if (opt->host == HOST_MALLOC_HOST) {
+		CHECK_MC(mcFreeHost(h_buf));
+		return;
+	}
+
+	CHECK_MC(mcHostUnregister(h_buf));
+	munmap(h_buf, size);
+	if (fd >= 0)
+		close(fd);
+}
+
+static void validate_read_write(void *h_buf, void *d_buf, size_t size,
+				uint8_t value, mcStream_t stream)
+{
+	uint8_t *check = malloc(size);
+
+	if (!check) {
+		fprintf(stderr, "malloc validation buffer failed: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	CHECK_MC(mcMemset(d_buf, value, size));
+	CHECK_MC(mcMemcpyAsync(h_buf, d_buf, size, mcMemcpyDeviceToHost, stream));
+	CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice, stream));
+	CHECK_MC(mcMemcpyAsync(check, d_buf, size, mcMemcpyDeviceToHost, stream));
+	CHECK_MC(mcStreamSynchronize(stream));
+
+	for (size_t i = 0; i < size; i++) {
+		if (check[i] != value) {
+			fprintf(stderr,
+				"ERROR: validation failed at byte %zu: read 0x%02x expected 0x%02x\n",
+				i, check[i], value);
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	free(check);
+	printf("validation        : write/read matched 0x%02x over %.2f MiB\n",
+	       value, (double)size / 1024.0 / 1024.0);
+}
+
+static double elapsed_bandwidth_gb(uint64_t bytes, float ms)
+{
+	if (ms <= 0.0f)
 		return 0.0;
-	return (double)(bytes / (1024.0L * 1024.0L * 1024.0L) / seconds);
+	return bytes_to_gb(bytes) / ((double)ms / 1000.0);
+}
+
+static void run_test(const struct options *opt)
+{
+	size_t size = opt->size_mb * 1024ULL * 1024ULL;
+	int fd = -1;
+	void *h_buf;
+	void *d_buf = NULL;
+	mcStream_t stream;
+	mcEvent_t start;
+	mcEvent_t stop;
+	float read_ms = 0.0f;
+	float write_ms = 0.0f;
+	uint64_t total_bytes;
+
+	h_buf = alloc_host_buffer(opt, size, &fd);
+	CHECK_MC(mcMalloc(&d_buf, size));
+	CHECK_MC(mcStreamCreate(&stream));
+	CHECK_MC(mcEventCreate(&start));
+	CHECK_MC(mcEventCreate(&stop));
+
+	validate_read_write(h_buf, d_buf, size, opt->write_value, stream);
+
+	for (int i = 0; i < 5; i++)
+		CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice, stream));
+	CHECK_MC(mcStreamSynchronize(stream));
+
+	CHECK_MC(mcEventRecord(start, stream));
+	for (int i = 0; i < opt->iterations; i++)
+		CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice, stream));
+	CHECK_MC(mcEventRecord(stop, stream));
+	CHECK_MC(mcEventSynchronize(stop));
+	CHECK_MC(mcEventElapsedTime(&read_ms, start, stop));
+
+	CHECK_MC(mcMemset(d_buf, opt->write_value, size));
+	CHECK_MC(mcStreamSynchronize(stream));
+	CHECK_MC(mcEventRecord(start, stream));
+	for (int i = 0; i < opt->iterations; i++)
+		CHECK_MC(mcMemcpyAsync(h_buf, d_buf, size, mcMemcpyDeviceToHost, stream));
+	CHECK_MC(mcEventRecord(stop, stream));
+	CHECK_MC(mcEventSynchronize(stop));
+	CHECK_MC(mcEventElapsedTime(&write_ms, start, stop));
+
+	total_bytes = (uint64_t)size * (uint64_t)opt->iterations;
+
+	printf("\n=== MUSA DMA Bandwidth Test ===\n");
+	printf("host mode         : %s\n", host_mode_name(opt->host));
+	if (opt->host == HOST_MMAP_REGISTER) {
+		printf("mmap mode         : %s\n", map_mode_name(opt->mode));
+		if (opt->mode == MODE_FILE) {
+			printf("path              : %s\n", opt->path);
+			printf("mmap offset       : 0x%llx bytes (%.2f MiB)\n",
+			       (unsigned long long)opt->offset_bytes,
+			       (double)opt->offset_bytes / 1024.0 / 1024.0);
+		}
+		printf("register flag     : %s\n",
+		       opt->use_io_memory ? "mcHostRegisterIoMemory" :
+					    "mcHostRegisterDefault");
+	}
+	printf("buffer size       : %.2f MiB\n", (double)size / 1024.0 / 1024.0);
+	printf("iterations        : %d\n", opt->iterations);
+	printf("write value       : 0x%02x\n", opt->write_value);
+	printf("total transfer    : %.2f GB\n\n", bytes_to_gb(total_bytes));
+	printf("READ  bandwidth   : %.2f GB/s\n",
+	       elapsed_bandwidth_gb(total_bytes, read_ms));
+	printf("WRITE bandwidth   : %.2f GB/s\n",
+	       elapsed_bandwidth_gb(total_bytes, write_ms));
+
+	CHECK_MC(mcEventDestroy(start));
+	CHECK_MC(mcEventDestroy(stop));
+	CHECK_MC(mcStreamDestroy(stream));
+	CHECK_MC(mcFree(d_buf));
+	free_host_buffer(opt, h_buf, size, fd);
 }
 
 int main(int argc, char **argv)
 {
 	struct options opt;
-	const char *dev_arg;
-	const char *dev_path;
-	char dev_path_buf[PATH_MAX];
-	uint64_t map_offset;
-	uint64_t map_size;
-	uint64_t offset_in_map;
-	void *map_addr;
-	double read_seconds;
-	double write_seconds;
-	int fd;
+	mcDeviceProp_t prop;
 
-	parse_options(argc, argv, &opt, &dev_arg);
-	dev_path = resolve_dev_path(dev_arg, dev_path_buf, sizeof(dev_path_buf));
+	parse_args(argc, argv, &opt);
+	CHECK_MC(mcSetDevice(opt.device));
+	CHECK_MC(mcGetDeviceProperties(&prop, opt.device));
 
-	load_mc_runtime();
-	CHECK_MC(mcSetDevice(opt.gpu));
-	fd = open(dev_path, O_RDWR | O_SYNC | O_CLOEXEC);
-	if (fd < 0) {
-		fprintf(stderr, "open %s failed: %s\n", dev_path, strerror(errno));
-		return EXIT_FAILURE;
-	}
+	printf("MUSA device       : %d\n", opt.device);
+	printf("MUSA GPU name     : %s\n", prop.name);
 
-	map_addr = map_physmem(fd, opt.offset, opt.size, &map_offset, &map_size,
-			       &offset_in_map);
-	CHECK_MC(mcHostRegister(map_addr, (size_t)map_size, mcHostRegisterIoMemory));
-
-	printf("GPU char-device bandwidth test:\n");
-	printf("  device        = %s\n", dev_path);
-	printf("  gpu           = %d\n", opt.gpu);
-	printf("  target_offset = 0x%" PRIx64 "\n", opt.offset);
-	printf("  size          = %" PRIu64 " MiB (%" PRIu64 " bytes)\n",
-	       (uint64_t)(opt.size / (1024ULL * 1024ULL)), opt.size);
-	printf("  iters         = %" PRIu64 "\n", opt.iters);
-	printf("  write_value   = 0x%02x\n", opt.write_value);
-	printf("  mmap_offset   = 0x%" PRIx64 "\n", map_offset);
-	printf("  mmap_size     = 0x%" PRIx64 " (%" PRIu64 " bytes)\n\n",
-	       map_size, map_size);
-
-	validate_gpu_access(map_addr, offset_in_map, opt.size, opt.write_value);
-
-	printf("Running GPU read bandwidth first...\n");
-	read_seconds = run_read_bandwidth(map_addr, offset_in_map, opt.size,
-					 opt.iters);
-	printf("READ  bandwidth: %.3f GiB/s (%" PRIu64 " bytes x %" PRIu64
-	       " iters in %.6f s)\n",
-	       bandwidth_gib_per_second(opt.size, opt.iters, read_seconds),
-	       opt.size, opt.iters, read_seconds);
-
-	printf("Running GPU write bandwidth with data 0x%02x...\n", opt.write_value);
-	write_seconds = run_write_bandwidth(map_addr, offset_in_map, opt.size,
-					   opt.iters, opt.write_value);
-	printf("WRITE bandwidth: %.3f GiB/s (%" PRIu64 " bytes x %" PRIu64
-	       " iters in %.6f s)\n",
-	       bandwidth_gib_per_second(opt.size, opt.iters, write_seconds),
-	       opt.size, opt.iters, write_seconds);
-
-	CHECK_MC(mcHostUnregister(map_addr));
-	munmap(map_addr, (size_t)map_size);
-	close(fd);
-	return EXIT_SUCCESS;
+	run_test(&opt);
+	return 0;
 }
