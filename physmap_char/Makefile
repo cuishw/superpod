@@ -4,6 +4,11 @@ PWD := $(shell pwd)
 CC ?= cc
 MXCC ?= mxcc
 CFLAGS ?= -Wall -Wextra -O2
+MUSA_HOME ?= /usr/local/musa
+MUSA_CPPFLAGS ?= -I$(MUSA_HOME)/include
+MUSA_LIBDIR ?= $(MUSA_HOME)/lib
+MUSA_LDFLAGS ?= -L$(MUSA_LIBDIR)
+MUSA_LDLIBS ?= -ldl
 
 obj-m += physmap_driver.o
 
