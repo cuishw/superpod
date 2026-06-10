@@ -335,7 +335,7 @@ static void *alloc_host_buffer(const struct options *opt, size_t size, int *fd_o
 	*fd_out = -1;
 
 	if (opt->host == HOST_MALLOC_HOST) {
-		CHECK_MC(mcMallocHost(&h_buf, size));
+		CHECK_MC(mcMallocHost(&h_buf, size, mcMallocHostDefault));
 		touch_buffer((uint8_t *)h_buf, size, opt->write_value);
 		return h_buf;
 	}
