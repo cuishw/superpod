@@ -2,8 +2,13 @@
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 CC ?= cc
-MXCC = mxcc
+MXCC ?= mxcc
 CFLAGS ?= -Wall -Wextra -O2
+MUSA_HOME ?= /usr/local/musa
+MUSA_CPPFLAGS ?= -I$(MUSA_HOME)/include
+MUSA_LIBDIR ?= $(MUSA_HOME)/lib
+MUSA_LDFLAGS ?= -L$(MUSA_LIBDIR)
+MUSA_LDLIBS ?= -lmusart
 
 obj-m += physmap_driver.o
 
@@ -28,7 +33,8 @@ physmap_mc_memtest: physmap_mc_memtest.c physmap_ioctl.h
 	$(MXCC) $(CFLAGS) -o $@ physmap_mc_memtest.c
 
 physmap_mc_bwtest: physmap_mc_bwtest.c physmap_ioctl.h
-	$(MXCC) $(CFLAGS) -o $@ physmap_mc_bwtest.c
+	$(CC) $(CFLAGS) $(MUSA_CPPFLAGS) -o $@ physmap_mc_bwtest.c \
+		$(MUSA_LDFLAGS) $(MUSA_LDLIBS)
 
 clean:
 	$(RM) physmapctl physmap_memtest physmap_mc_memtest physmap_mc_bwtest
