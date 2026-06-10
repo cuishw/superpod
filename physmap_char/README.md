@@ -98,6 +98,25 @@ sudo physmap_mc_memtest --gpu 0 /dev/physmap0 read64 0x1000
 
 Use `--register default` instead of the default `--register io` if the mapped range should be registered with `mcHostRegisterDefault`.
 
+## Muxi GPU bandwidth test tool
+
+`physmap_mc_bwtest` measures GPU access bandwidth to a mapped character device. It maps the requested range, registers it as `mcHostRegisterIoMemory`, validates the GPU write/read path by writing the selected byte value and reading it back, then measures GPU read bandwidth first and GPU write bandwidth second. The bandwidth tool uses only the MUSA runtime API, so its Makefile target links it with the host C compiler plus `-lmusart` instead of invoking `mxcc`, which avoids requiring a host `libstdc++` installation for this C-only utility.
+
+```sh
+make musa
+# If MUSA is installed outside /usr/local/musa, override MUSA_HOME or MUSA_LIBDIR.
+sudo physmap_mc_bwtest --gpu 0 --size 64 --offset 0 --iters 100 --value 0xa5 /dev/physmap0
+sudo physmap_mc_bwtest --gpu 1 --size 256 --offset 0x100000 --iters 50 h0-0
+```
+
+Options:
+
+* `--size MB`: transfer size in MiB, default `64`.
+* `--offset BYTES`: device offset, default `0`; accepts decimal, `0x` hexadecimal, and binary suffixes such as `4K` or `1G`.
+* `--iters N`: read and write iterations, default `100`.
+* `--gpu ID`: GPU device id, default `0`.
+* `--value BYTE` / `--data BYTE`: byte value used for validation and write-bandwidth traffic, default `0xa5`.
+
 ## List mappings
 
 ```sh
