@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <stdint.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,9 @@
 #define DEFAULT_SIZE_MB 1024ULL
 #define DEFAULT_ITERS 100
 #define DEFAULT_WRITE_VALUE 0xa5U
+
+#define TEST_READ  (1U << 0)
+#define TEST_WRITE (1U << 1)
 
 #define CHECK_MC(call)                                                       \
 	do {                                                                     \
@@ -58,7 +62,17 @@ struct options {
 	int device;
 	int use_io_memory;
 	uint8_t write_value;
+	unsigned int test_mask;
+	int continuous;
 };
+
+static volatile sig_atomic_t stop_requested;
+
+static void handle_stop_signal(int sig)
+{
+	(void)sig;
+	stop_requested = 1;
+}
 
 static uint64_t parse_size_value(const char *s, const char *name)
 {
@@ -131,7 +145,8 @@ static void usage(const char *prog)
 	printf("  %s [--host mmap-register|malloc-host] [--mode anon|file] [--path PATH]\n",
 	       prog);
 	printf("     [--size MB] [--offset BYTES] [--iters N] [--gpu ID] [--io]\n");
-	printf("     [--value BYTE|--data BYTE]\n");
+	printf("     [--direction read|write|both] [--read-only] [--write-only]\n");
+	printf("     [--continuous] [--value BYTE|--data BYTE]\n");
 	printf("\n");
 
 	printf("Host memory modes:\n");
@@ -145,9 +160,13 @@ static void usage(const char *prog)
 	printf("  --offset BYTES        mmap offset inside file/BAR resource, default 0\n");
 	printf("                        accepts decimal, hex, or suffix K/M/G/T, e.g. 0x200000000 or 2G\n");
 	printf("                        file/BAR mmap offset must be page aligned\n");
-	printf("  --iters N             iterations, default %d\n", DEFAULT_ITERS);
+	printf("  --iters N             iterations per measurement, default %d\n", DEFAULT_ITERS);
 	printf("  --gpu ID              GPU id, default 0\n");
 	printf("  --io                  use mcHostRegisterIoMemory for mmap-register\n");
+	printf("  --direction MODE      test read, write, or both directions, default both\n");
+	printf("  --read-only           only test GPU read / host-to-device bandwidth\n");
+	printf("  --write-only          only test GPU write / device-to-host bandwidth\n");
+	printf("  --continuous          print bandwidth repeatedly until Ctrl-C/SIGTERM\n");
 	printf("  --value BYTE          byte value used for validation and write bandwidth, default 0x%02x\n",
 	       DEFAULT_WRITE_VALUE);
 	printf("\n");
@@ -171,6 +190,8 @@ static void parse_args(int argc, char **argv, struct options *opt)
 	opt->device = 0;
 	opt->use_io_memory = 0;
 	opt->write_value = DEFAULT_WRITE_VALUE;
+	opt->test_mask = TEST_READ | TEST_WRITE;
+	opt->continuous = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--host") && i + 1 < argc) {
@@ -205,6 +226,24 @@ static void parse_args(int argc, char **argv, struct options *opt)
 			opt->device = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--io")) {
 			opt->use_io_memory = 1;
+		} else if (!strcmp(argv[i], "--direction") && i + 1 < argc) {
+			i++;
+			if (!strcmp(argv[i], "read"))
+				opt->test_mask = TEST_READ;
+			else if (!strcmp(argv[i], "write"))
+				opt->test_mask = TEST_WRITE;
+			else if (!strcmp(argv[i], "both"))
+				opt->test_mask = TEST_READ | TEST_WRITE;
+			else {
+				usage(argv[0]);
+				exit(EXIT_FAILURE);
+			}
+		} else if (!strcmp(argv[i], "--read-only")) {
+			opt->test_mask = TEST_READ;
+		} else if (!strcmp(argv[i], "--write-only")) {
+			opt->test_mask = TEST_WRITE;
+		} else if (!strcmp(argv[i], "--continuous")) {
+			opt->continuous = 1;
 		} else if ((!strcmp(argv[i], "--value") || !strcmp(argv[i], "--data")) &&
 			   i + 1 < argc) {
 			opt->write_value = parse_u8_value(argv[++i], "--value");
@@ -407,49 +446,43 @@ static double elapsed_bandwidth_gb(uint64_t bytes, float ms)
 	return bytes_to_gb(bytes) / ((double)ms / 1000.0);
 }
 
-static void run_test(const struct options *opt)
+static double measure_read_bandwidth(void *h_buf, void *d_buf, size_t size,
+				     int iterations, mcStream_t stream,
+				     mcEvent_t start, mcEvent_t stop)
 {
-	size_t size = opt->size_mb * 1024ULL * 1024ULL;
-	int fd = -1;
-	void *h_buf;
-	void *d_buf = NULL;
-	mcStream_t stream;
-	mcEvent_t start;
-	mcEvent_t stop;
-	float read_ms = 0.0f;
-	float write_ms = 0.0f;
-	uint64_t total_bytes;
-
-	h_buf = alloc_host_buffer(opt, size, &fd);
-	CHECK_MC(mcMalloc(&d_buf, size));
-	CHECK_MC(mcStreamCreate(&stream));
-	CHECK_MC(mcEventCreate(&start));
-	CHECK_MC(mcEventCreate(&stop));
-
-	validate_read_write(h_buf, d_buf, size, opt->write_value, stream);
-
-	for (int i = 0; i < 5; i++)
-		CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice, stream));
-	CHECK_MC(mcStreamSynchronize(stream));
+	float ms = 0.0f;
+	uint64_t total_bytes = (uint64_t)size * (uint64_t)iterations;
 
 	CHECK_MC(mcEventRecord(start, stream));
-	for (int i = 0; i < opt->iterations; i++)
+	for (int i = 0; i < iterations; i++)
 		CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice, stream));
 	CHECK_MC(mcEventRecord(stop, stream));
 	CHECK_MC(mcEventSynchronize(stop));
-	CHECK_MC(mcEventElapsedTime(&read_ms, start, stop));
+	CHECK_MC(mcEventElapsedTime(&ms, start, stop));
 
-	CHECK_MC(mcMemset(d_buf, opt->write_value, size));
-	CHECK_MC(mcStreamSynchronize(stream));
+	return elapsed_bandwidth_gb(total_bytes, ms);
+}
+
+static double measure_write_bandwidth(void *h_buf, void *d_buf, size_t size,
+				      int iterations, mcStream_t stream,
+				      mcEvent_t start, mcEvent_t stop)
+{
+	float ms = 0.0f;
+	uint64_t total_bytes = (uint64_t)size * (uint64_t)iterations;
+
 	CHECK_MC(mcEventRecord(start, stream));
-	for (int i = 0; i < opt->iterations; i++)
+	for (int i = 0; i < iterations; i++)
 		CHECK_MC(mcMemcpyAsync(h_buf, d_buf, size, mcMemcpyDeviceToHost, stream));
 	CHECK_MC(mcEventRecord(stop, stream));
 	CHECK_MC(mcEventSynchronize(stop));
-	CHECK_MC(mcEventElapsedTime(&write_ms, start, stop));
+	CHECK_MC(mcEventElapsedTime(&ms, start, stop));
 
-	total_bytes = (uint64_t)size * (uint64_t)opt->iterations;
+	return elapsed_bandwidth_gb(total_bytes, ms);
+}
 
+static void print_test_config(const struct options *opt, size_t size,
+			      uint64_t total_bytes)
+{
 	printf("\n=== MUSA DMA Bandwidth Test ===\n");
 	printf("host mode         : %s\n", host_mode_name(opt->host));
 	if (opt->host == HOST_MMAP_REGISTER) {
@@ -465,13 +498,74 @@ static void run_test(const struct options *opt)
 					    "mcHostRegisterDefault");
 	}
 	printf("buffer size       : %.2f MiB\n", (double)size / 1024.0 / 1024.0);
-	printf("iterations        : %d\n", opt->iterations);
+	printf("iterations        : %d%s\n", opt->iterations,
+	       opt->continuous ? " per update" : "");
+	printf("direction         : %s\n",
+	       opt->test_mask == TEST_READ ? "read" :
+	       opt->test_mask == TEST_WRITE ? "write" : "both");
+	printf("continuous        : %s\n", opt->continuous ? "yes" : "no");
 	printf("write value       : 0x%02x\n", opt->write_value);
-	printf("total transfer    : %.2f GB\n\n", bytes_to_gb(total_bytes));
-	printf("READ  bandwidth   : %.2f GB/s\n",
-	       elapsed_bandwidth_gb(total_bytes, read_ms));
-	printf("WRITE bandwidth   : %.2f GB/s\n",
-	       elapsed_bandwidth_gb(total_bytes, write_ms));
+	printf("total transfer    : %.2f GB%s\n\n", bytes_to_gb(total_bytes),
+	       opt->continuous ? " per direction/update" : "");
+}
+
+static void run_test(const struct options *opt)
+{
+	size_t size = opt->size_mb * 1024ULL * 1024ULL;
+	int fd = -1;
+	void *h_buf;
+	void *d_buf = NULL;
+	mcStream_t stream;
+	mcEvent_t start;
+	mcEvent_t stop;
+	uint64_t total_bytes = (uint64_t)size * (uint64_t)opt->iterations;
+
+	h_buf = alloc_host_buffer(opt, size, &fd);
+	CHECK_MC(mcMalloc(&d_buf, size));
+	CHECK_MC(mcStreamCreate(&stream));
+	CHECK_MC(mcEventCreate(&start));
+	CHECK_MC(mcEventCreate(&stop));
+
+	validate_read_write(h_buf, d_buf, size, opt->write_value, stream);
+
+	for (int i = 0; i < 5; i++)
+		CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice, stream));
+	CHECK_MC(mcMemset(d_buf, opt->write_value, size));
+	CHECK_MC(mcStreamSynchronize(stream));
+
+	print_test_config(opt, size, total_bytes);
+
+	if (opt->continuous) {
+		unsigned long update = 0;
+
+		printf("Press Ctrl-C to stop.\n");
+		while (!stop_requested) {
+			update++;
+			printf("[%lu]", update);
+			if (opt->test_mask & TEST_READ)
+				printf(" READ %.2f GB/s",
+				       measure_read_bandwidth(h_buf, d_buf, size,
+							      opt->iterations, stream,
+							      start, stop));
+			if (opt->test_mask & TEST_WRITE)
+				printf(" WRITE %.2f GB/s",
+				       measure_write_bandwidth(h_buf, d_buf, size,
+							       opt->iterations, stream,
+							       start, stop));
+			printf("\n");
+			fflush(stdout);
+		}
+		printf("Stopping continuous bandwidth test.\n");
+	} else {
+		if (opt->test_mask & TEST_READ)
+			printf("READ  bandwidth   : %.2f GB/s\n",
+			       measure_read_bandwidth(h_buf, d_buf, size, opt->iterations,
+						      stream, start, stop));
+		if (opt->test_mask & TEST_WRITE)
+			printf("WRITE bandwidth   : %.2f GB/s\n",
+			       measure_write_bandwidth(h_buf, d_buf, size, opt->iterations,
+						       stream, start, stop));
+	}
 
 	CHECK_MC(mcEventDestroy(start));
 	CHECK_MC(mcEventDestroy(stop));
@@ -488,6 +582,8 @@ int main(int argc, char **argv)
 	parse_args(argc, argv, &opt);
 	CHECK_MC(mcSetDevice(opt.device));
 	CHECK_MC(mcGetDeviceProperties(&prop, opt.device));
+	signal(SIGINT, handle_stop_signal);
+	signal(SIGTERM, handle_stop_signal);
 
 	printf("MUSA device       : %d\n", opt.device);
 	printf("MUSA GPU name     : %s\n", prop.name);

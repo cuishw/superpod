@@ -100,13 +100,14 @@ Use `--register default` instead of the default `--register io` if the mapped ra
 
 ## Muxi GPU bandwidth test tool
 
-`physmap_mc_bwtest` measures MUSA DMA bandwidth for host memory that is either allocated by `mcMallocHost` or mapped with `mmap` and registered with `mcHostRegister`. For physmap character devices, use `--host mmap-register --mode file --path /dev/physmapN --io`. The tool validates GPU write/read consistency with the selected byte value before measuring bandwidth, then reports read bandwidth first and write bandwidth second.
+`physmap_mc_bwtest` measures MUSA DMA bandwidth for host memory that is either allocated by `mcMallocHost` or mapped with `mmap` and registered with `mcHostRegister`. For physmap character devices, use `--host mmap-register --mode file --path /dev/physmapN --io`. The tool validates GPU write/read consistency with the selected byte value before measuring bandwidth, then reports read bandwidth first and write bandwidth second by default. Use `--direction read|write|both`, `--read-only`, or `--write-only` to limit the measured direction. Add `--continuous` to print live bandwidth updates until the process is terminated with Ctrl-C or SIGTERM.
 
 ```sh
 make musa
 sudo physmap_mc_bwtest --host mmap-register --mode file --path /dev/physmap0 --size 64 --offset 0 --iters 100 --gpu 0 --io --value 0xa5
 sudo physmap_mc_bwtest --host mmap-register --mode file --path /sys/bus/pci/devices/0000:86:00.0/resource2 --size 1024 --offset 2G --iters 100 --gpu 0 --io
 sudo physmap_mc_bwtest --host malloc-host --size 1024 --iters 100 --gpu 0
+sudo physmap_mc_bwtest --host mmap-register --mode file --path /dev/physmap0 --size 64 --iters 10 --gpu 0 --io --read-only --continuous
 ```
 
 Options:
@@ -116,9 +117,12 @@ Options:
 * `--path PATH`: file/BAR/device path required by `--mode file`.
 * `--size MB`: transfer size in MiB, default `1024`.
 * `--offset BYTES`: page-aligned mmap offset for `--mode file`, default `0`; accepts decimal, `0x` hexadecimal, and binary suffixes such as `4K` or `2G`.
-* `--iters N`: read and write iterations, default `100`.
+* `--iters N`: iterations per measurement, default `100`.
 * `--gpu ID`: GPU device id, default `0`.
 * `--io`: register mapped memory with `mcHostRegisterIoMemory` instead of `mcHostRegisterDefault`.
+* `--direction read|write|both`: choose GPU read (host-to-device), GPU write (device-to-host), or both directions, default `both`.
+* `--read-only` / `--write-only`: shortcuts for `--direction read` and `--direction write`.
+* `--continuous`: repeatedly print bandwidth for the selected direction(s) until Ctrl-C or SIGTERM.
 * `--value BYTE` / `--data BYTE`: byte value used for validation and write-bandwidth traffic, default `0xa5`.
 
 ## List mappings
