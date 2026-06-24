@@ -68,15 +68,27 @@ struct FreeBlocksResponse {
     std::uint64_t freed_count{};
 };
 
-struct GetRequest {
+struct ExistRequest {
     std::string key;
 };
 
-struct GetResponse {
+struct ExistResponse {
     RpcCode code{RpcCode::kOk};
     std::string message;
     HostId host_id{};
     BlockId block_id{};
+};
+
+struct BatchExistRequest {
+    std::vector<std::string> keys;
+};
+
+struct BatchExistResponse {
+    RpcCode code{RpcCode::kOk};
+    std::string message;
+    HostId host_id{};
+    std::uint64_t matched_count{};
+    std::vector<KeyBlockLocation> matches;
 };
 
 }  // namespace pcie

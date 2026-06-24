@@ -83,7 +83,8 @@ int main(int argc, char* argv[]) {
     server.register_handler<&pcie::MasterService::RegisterMemory>(&service);
     server.register_handler<&pcie::MasterService::AllocBlocks>(&service);
     server.register_handler<&pcie::MasterService::FreeBlocks>(&service);
-    server.register_handler<&pcie::MasterService::Get>(&service);
+    server.register_handler<&pcie::MasterService::Exist>(&service);
+    server.register_handler<&pcie::MasterService::BatchExist>(&service);
 
     std::cout << "PCIe memory master listening on " << options.address << ':'
               << options.port << " with " << options.threads << " RPC threads\n";

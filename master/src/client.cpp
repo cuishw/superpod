@@ -37,8 +37,10 @@ void PrintCommands() {
         << "      Allocate one block for each key in this client's host pool.\n"
         << "  free <sha256_key> [sha256_key ...]\n"
         << "      Free this client's blocks by key.\n"
-        << "  get <sha256_key>\n"
+        << "  exist <sha256_key>\n"
         << "      Find the host ID and Block ID assigned to a key.\n"
+        << "  batch_exist <sha256_key> [sha256_key ...]\n"
+        << "      Find the longest matching prefix whose blocks belong to one host.\n"
         << "  help\n"
         << "  quit | exit\n";
 }
@@ -207,29 +209,59 @@ void AllocBlocks(coro_rpc::coro_rpc_client& client,
     }
 }
 
-void GetBlock(coro_rpc::coro_rpc_client& client,
-              std::istringstream& input) {
+void ExistBlock(coro_rpc::coro_rpc_client& client,
+                std::istringstream& input) {
     std::string key;
     if (!(input >> key) || HasExtraToken(input)) {
-        std::cerr << "Usage: get <sha256_key>\n";
+        std::cerr << "Usage: exist <sha256_key>\n";
         return;
     }
 
     auto result = async_simple::coro::syncAwait(
-        client.call<&pcie::MasterService::Get>(pcie::GetRequest{key}));
+        client.call<&pcie::MasterService::Exist>(pcie::ExistRequest{key}));
     if (!result) {
         std::cerr << "RPC failed: " << result.error().msg << '\n';
         return;
     }
 
     const auto& response = result.value();
-    std::cout << "Get: " << CodeName(response.code)
+    std::cout << "Exist: " << CodeName(response.code)
               << ", message=\"" << response.message << "\"";
     if (response.code == pcie::RpcCode::kOk) {
         std::cout << ", host_id=" << response.host_id
                   << ", block_id=" << response.block_id;
     }
     std::cout << '\n';
+}
+
+void BatchExistBlocks(coro_rpc::coro_rpc_client& client,
+                      std::istringstream& input) {
+    pcie::BatchExistRequest request;
+    std::string key;
+    while (input >> key) {
+        request.keys.push_back(key);
+    }
+    if (request.keys.empty()) {
+        std::cerr << "Usage: batch_exist <sha256_key> [sha256_key ...]\n";
+        return;
+    }
+
+    auto result = async_simple::coro::syncAwait(
+        client.call<&pcie::MasterService::BatchExist>(request));
+    if (!result) {
+        std::cerr << "RPC failed: " << result.error().msg << '\n';
+        return;
+    }
+
+    const auto& response = result.value();
+    std::cout << "BatchExist: " << CodeName(response.code)
+              << ", message=\"" << response.message << "\""
+              << ", host_id=" << response.host_id
+              << ", matched_count=" << response.matched_count << '\n';
+    for (const auto& match : response.matches) {
+        std::cout << "  " << match.key << " -> "
+                  << match.host_id << ':' << match.block_id << '\n';
+    }
 }
 
 void FreeBlocks(coro_rpc::coro_rpc_client& client,
@@ -283,8 +315,10 @@ void RunInteractive(coro_rpc::coro_rpc_client& client,
             AllocBlocks(client, input, host_id);
         } else if (command == "free") {
             FreeBlocks(client, input, host_id);
-        } else if (command == "get") {
-            GetBlock(client, input);
+        } else if (command == "exist") {
+            ExistBlock(client, input);
+        } else if (command == "batch_exist") {
+            BatchExistBlocks(client, input);
         } else if (command == "help") {
             PrintCommands();
         } else if (command == "quit" || command == "exit") {

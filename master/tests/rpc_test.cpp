@@ -27,7 +27,8 @@ int main() {
     server.register_handler<&pcie::MasterService::RegisterMemory>(&service);
     server.register_handler<&pcie::MasterService::AllocBlocks>(&service);
     server.register_handler<&pcie::MasterService::FreeBlocks>(&service);
-    server.register_handler<&pcie::MasterService::Get>(&service);
+    server.register_handler<&pcie::MasterService::Exist>(&service);
+    server.register_handler<&pcie::MasterService::BatchExist>(&service);
 
     auto server_future = server.async_start();
     Check(!server_future.hasResult(), "RPC server starts asynchronously");
@@ -68,20 +69,20 @@ int main() {
         querying_client.connect("127.0.0.1", std::to_string(server.port())));
     Check(!query_connect_error, "another node connects to Master");
     const auto cross_node_get = async_simple::coro::syncAwait(
-        querying_client.call<&pcie::MasterService::Get>(
-            pcie::GetRequest{std::string(64, 'A')}));
+        querying_client.call<&pcie::MasterService::Exist>(
+            pcie::ExistRequest{std::string(64, 'A')}));
     Check(cross_node_get.value().code == pcie::RpcCode::kOk &&
               cross_node_get.value().host_id == 7 &&
               cross_node_get.value().block_id == 0,
           "another node resolves a key using case-insensitive SHA-256 hex");
 
     const auto get_result = async_simple::coro::syncAwait(
-        client.call<&pcie::MasterService::Get>(pcie::GetRequest{keys[1]}));
-    Check(static_cast<bool>(get_result), "Get RPC succeeds");
+        client.call<&pcie::MasterService::Exist>(pcie::ExistRequest{keys[1]}));
+    Check(static_cast<bool>(get_result), "Exist RPC succeeds");
     Check(get_result.value().code == pcie::RpcCode::kOk &&
               get_result.value().host_id == 7 &&
               get_result.value().block_id == 1,
-          "Get returns the key's host and Block ID");
+          "Exist returns the key's host and Block ID");
 
     const auto free_result = async_simple::coro::syncAwait(
         client.call<&pcie::MasterService::FreeBlocks>(
@@ -94,9 +95,9 @@ int main() {
           "network free updates the allocator state");
 
     const auto get_freed = async_simple::coro::syncAwait(
-        client.call<&pcie::MasterService::Get>(pcie::GetRequest{keys[1]}));
+        client.call<&pcie::MasterService::Exist>(pcie::ExistRequest{keys[1]}));
     Check(get_freed.value().code == pcie::RpcCode::kKeyNotFound,
-          "Get no longer resolves a freed key");
+          "Exist no longer resolves a freed key");
 
     server.stop();
     std::cout << "All network RPC tests passed\n";

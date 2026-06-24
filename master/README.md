@@ -11,8 +11,11 @@
   列表，每个 key 分配一个 Block，并返回 key、主机 ID 与 Block ID 的对应关系。
 - `FreeBlocks(FreeBlocksRequest)`：请求携带固定的 `host_id` 和 key 列表，通过
   key 找到 Block 后将其放回对应主机空闲队列尾部。
-- `Get(GetRequest)`：任何 Client 都可以查询指定 key，返回其所在的 `host_id`
+- `Exist(ExistRequest)`：任何 Client 都可以查询指定 key，返回其所在的 `host_id`
   和 `block_id`。
+- `BatchExist(BatchExistRequest)`：按请求顺序查询一组 key，返回同一 `host_id`
+  下连续匹配前缀的 Block ID 列表和匹配个数；遇到缺失 key 或不同主机的 key
+  时立即停止。
 
 协议和 RPC 声明位于 `include/pcie/`，后续 Client 应复用这些头文件调用 RPC。
 注册信息目前仅保存在 Master 进程内存中，Master 重启后需要 Client 重新注册。
@@ -29,12 +32,14 @@
 - 注册：O(1)，元数据大小不随注册内存容量增长。
 - 分配：平均 O(申请 Block 数)，主机池定位平均 O(1)。
 - 释放：O(key 数量)，平均 O(1) 查询每个 key；整批请求原子成功或失败。
+- 批量查询：O(key 数量)，平均 O(1) 查询每个 key；结果只包含同一主机下的连续
+  匹配前缀。
 - 元数据空间：O(当前已分配 Block 数 + 已回收待复用 Block 数)。
 
 key 必须是恰好 64 个十六进制字符组成的 SHA-256 字符串，并在 Master 中全局
 唯一。Master 维护 `key -> (host_id, block_id)` 哈希索引；Alloc 会拒绝已存在的
-key，Free 只能释放属于请求 `host_id` 的 key，Get 则允许其他节点跨主机查询。
-Alloc 和 Free 都先校验完整批次，任一 key 出错时不会部分修改分配状态。
+key，Free 只能释放属于请求 `host_id` 的 key，Exist/BatchExist 则允许其他节点
+跨主机查询。Alloc 和 Free 都先校验完整批次，任一 key 出错时不会部分修改分配状态。
 
 ## 依赖
 
@@ -83,8 +88,12 @@ rpc> alloc aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbb
 AllocBlocks: OK, message="blocks allocated", host_id=1, blocks=2
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> 1:0
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -> 1:1
-rpc> get aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-Get: OK, message="key found", host_id=1, block_id=0
+rpc> exist aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Exist: OK, message="key found", host_id=1, block_id=0
+rpc> batch_exist aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+BatchExist: OK, message="matching prefix found", host_id=1, matched_count=2
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> 1:0
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -> 1:1
 rpc> free aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 FreeBlocks: OK, message="blocks freed", host_id=1, freed_count=1
 rpc> quit

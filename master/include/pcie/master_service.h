@@ -18,7 +18,8 @@ class MasterService {
 
     AllocBlocksResponse AllocBlocks(const AllocBlocksRequest& request);
     FreeBlocksResponse FreeBlocks(const FreeBlocksRequest& request);
-    GetResponse Get(const GetRequest& request) const;
+    ExistResponse Exist(const ExistRequest& request) const;
+    BatchExistResponse BatchExist(const BatchExistRequest& request) const;
 
     [[nodiscard]] std::optional<MemoryRegistration> FindHost(HostId host_id) const;
     [[nodiscard]] std::size_t RegisteredHostCount() const;
