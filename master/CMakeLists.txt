@@ -9,6 +9,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Threads REQUIRED)
 find_package(yalantinglibs CONFIG REQUIRED)
 
+find_path(MUSA_INCLUDE_DIR mc_runtime.h
+    HINTS ENV MUSA_HOME
+    PATH_SUFFIXES include
+)
+find_library(MUSA_RUNTIME_LIBRARY
+    NAMES musa_runtime musart
+    HINTS ENV MUSA_HOME
+    PATH_SUFFIXES lib lib64
+)
+
 add_library(pcie_master_core
     src/master_service.cpp
 )
@@ -37,6 +47,11 @@ target_link_libraries(pcie_client PRIVATE
     yalantinglibs::yalantinglibs
     Threads::Threads
 )
+if(MUSA_INCLUDE_DIR AND MUSA_RUNTIME_LIBRARY)
+    target_compile_definitions(pcie_client PRIVATE PCIE_HAS_MUSA)
+    target_include_directories(pcie_client PRIVATE ${MUSA_INCLUDE_DIR})
+    target_link_libraries(pcie_client PRIVATE ${MUSA_RUNTIME_LIBRARY})
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
