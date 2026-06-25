@@ -82,7 +82,7 @@ ctest --test-dir build --output-on-failure
 也可以让 Client 读取 physmap 配置文件并自动注册当前 `--host-id` 对应的内存：
 
 ```bash
-./build/pcie_client --host-id 2 --config physmap.conf --block-size 0x1000
+./build/pcie_client --host-id 2 --config physmap.conf --block-size 0x1000 --gpu 0
 ```
 
 配置文件每行格式为 `<host_id> <char_device> <start_address> <size>`，数字支持十进制
@@ -98,7 +98,9 @@ ctest --test-dir build --output-on-failure
 Client 会打开并 `mmap` 文件中的每个字符设备，用 `--host-id` 对应行向 Master
 注册 `start_address`、`size` 和 `--block-size`。`exist`/`batch_exist` 返回远端
 Block 时，Client 会按 `mmap_base + block_id * block_size` 打印对应映射地址；
-这些 physmap 内存不能由 CPU 直接访问，应通过沐曦 GPU/DMA 路径使用。
+这些 physmap 内存不能由 CPU 直接访问，`write` 和 `get` 命令会使用沐曦
+MUSA GPU/DMA 路径访问。默认使用 `--gpu 0` 和 `--gpu-register io`，也可指定
+`--gpu-register default`。
 
 交互示例：
 
@@ -109,6 +111,11 @@ rpc> alloc aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbb
 AllocBlocks: OK, message="blocks allocated", host_id=1, blocks=2
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> 1:0
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -> 1:1
+rpc> write aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0xbb
+Write: OK, key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, host_id=1, block_id=0, bytes=4096, value=0xbb
+rpc> get aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 16
+Get: OK, key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, host_id=1, block_id=0, bytes=16
+  0x00000000: bb bb bb bb bb bb bb bb bb bb bb bb bb bb bb bb
 rpc> exist aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 Exist: OK, message="key found", host_id=1, block_id=0
 rpc> batch_exist aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb

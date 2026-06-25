@@ -20,6 +20,10 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#ifdef PCIE_HAS_MUSA
+#include <mc_runtime.h>
+#endif
+
 #include <async_simple/coro/SyncAwait.h>
 #include <ylt/coro_rpc/coro_rpc_client.hpp>
 
@@ -35,12 +39,15 @@ struct Options {
     bool has_host_id{false};
     std::string config_path;
     std::uint64_t block_size{4096};
+    int gpu_id{0};
+    bool musa_register_io{true};
 };
 
 void PrintProgramUsage(std::string_view program) {
     std::cout << "Usage: " << program
               << " --host-id ID [--host HOST] [--port PORT]\n"
-              << "       [--config PATH] [--block-size BYTES]\n";
+              << "       [--config PATH] [--block-size BYTES]\n"
+              << "       [--gpu ID] [--gpu-register io|default]\n";
 }
 
 struct PhysmapConfigEntry {
@@ -111,6 +118,21 @@ class HostMappings {
     std::unordered_map<pcie::HostId, HostMapping> mappings_;
 };
 
+class GpuAccessor {
+   public:
+    bool Initialize(int gpu_id, bool register_io);
+    bool FillBlock(void* address, std::uint64_t size, std::uint8_t value) const;
+    bool ReadBlock(const void* address, std::uint64_t size,
+                   std::vector<std::uint8_t>& output) const;
+    [[nodiscard]] bool available() const { return available_; }
+
+   private:
+    bool available_{false};
+#ifdef PCIE_HAS_MUSA
+    bool register_io_{true};
+#endif
+};
+
 void PrintCommands() {
     std::cout
         << "Commands:\n"
@@ -118,6 +140,10 @@ void PrintCommands() {
         << "      Register a memory region. Numbers may be decimal or 0x-prefixed hex.\n"
         << "  alloc <sha256_key> [sha256_key ...]\n"
         << "      Allocate one block for each key in this client's host pool.\n"
+        << "  write <sha256_key> <byte_value> [size]\n"
+        << "      Fill the key's block through the Muxi GPU path. Defaults to one block.\n"
+        << "  get <sha256_key> [size]\n"
+        << "      Read bytes from the key's block through the Muxi GPU path. Defaults to 1 byte.\n"
         << "  free <sha256_key> [sha256_key ...]\n"
         << "      Free this client's blocks by key.\n"
         << "  exist <sha256_key>\n"
@@ -277,6 +303,115 @@ const HostMapping* HostMappings::FindMapping(pcie::HostId host_id) const {
     return &mapping->second;
 }
 
+#ifdef PCIE_HAS_MUSA
+bool CheckMc(mcError_t status, std::string_view operation) {
+    if (status == mcSuccess) {
+        return true;
+    }
+    std::cerr << "MUSA " << operation << " failed: "
+              << mcGetErrorString(status) << '\n';
+    return false;
+}
+#endif
+
+bool GpuAccessor::Initialize(int gpu_id, bool register_io) {
+#ifdef PCIE_HAS_MUSA
+    if (!CheckMc(mcSetDevice(gpu_id), "mcSetDevice")) {
+        return false;
+    }
+    register_io_ = register_io;
+    available_ = true;
+    return true;
+#else
+    static_cast<void>(gpu_id);
+    static_cast<void>(register_io);
+    std::cerr << "Client was built without MUSA runtime support; "
+                 "GPU block access commands are disabled\n";
+    available_ = false;
+    return false;
+#endif
+}
+
+bool GpuAccessor::FillBlock(void* address, std::uint64_t size,
+                            std::uint8_t value) const {
+    if (size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        std::cerr << "GPU write size is too large\n";
+        return false;
+    }
+#ifdef PCIE_HAS_MUSA
+    if (!available_) {
+        std::cerr << "GPU access is not initialized\n";
+        return false;
+    }
+    void* device_buffer = nullptr;
+    const auto byte_count = static_cast<std::size_t>(size);
+    const auto flags = register_io_ ? mcHostRegisterIoMemory
+                                    : mcHostRegisterDefault;
+    if (!CheckMc(mcHostRegister(address, byte_count, flags),
+                 "mcHostRegister")) {
+        return false;
+    }
+    bool ok = CheckMc(mcMalloc(&device_buffer, byte_count), "mcMalloc") &&
+              CheckMc(mcMemset(device_buffer, value, byte_count), "mcMemset") &&
+              CheckMc(mcMemcpy(address, device_buffer, byte_count,
+                               mcMemcpyDeviceToHost),
+                      "mcMemcpy(DeviceToHost)") &&
+              CheckMc(mcDeviceSynchronize(), "mcDeviceSynchronize");
+    if (device_buffer != nullptr) {
+        static_cast<void>(CheckMc(mcFree(device_buffer), "mcFree"));
+    }
+    static_cast<void>(CheckMc(mcHostUnregister(address), "mcHostUnregister"));
+    return ok;
+#else
+    static_cast<void>(address);
+    static_cast<void>(value);
+    std::cerr << "GPU write requires MUSA runtime support\n";
+    return false;
+#endif
+}
+
+bool GpuAccessor::ReadBlock(const void* address, std::uint64_t size,
+                            std::vector<std::uint8_t>& output) const {
+    if (size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        std::cerr << "GPU read size is too large\n";
+        return false;
+    }
+#ifdef PCIE_HAS_MUSA
+    if (!available_) {
+        std::cerr << "GPU access is not initialized\n";
+        return false;
+    }
+    void* device_buffer = nullptr;
+    const auto byte_count = static_cast<std::size_t>(size);
+    const auto flags = register_io_ ? mcHostRegisterIoMemory
+                                    : mcHostRegisterDefault;
+    output.assign(byte_count, 0);
+    if (!CheckMc(mcHostRegister(const_cast<void*>(address), byte_count, flags),
+                 "mcHostRegister")) {
+        return false;
+    }
+    bool ok = CheckMc(mcMalloc(&device_buffer, byte_count), "mcMalloc") &&
+              CheckMc(mcMemcpy(device_buffer, address, byte_count,
+                               mcMemcpyHostToDevice),
+                      "mcMemcpy(HostToDevice)") &&
+              CheckMc(mcMemcpy(output.data(), device_buffer, byte_count,
+                               mcMemcpyDeviceToHost),
+                      "mcMemcpy(DeviceToHost)") &&
+              CheckMc(mcDeviceSynchronize(), "mcDeviceSynchronize");
+    if (device_buffer != nullptr) {
+        static_cast<void>(CheckMc(mcFree(device_buffer), "mcFree"));
+    }
+    static_cast<void>(CheckMc(mcHostUnregister(const_cast<void*>(address)),
+                              "mcHostUnregister"));
+    return ok;
+#else
+    static_cast<void>(address);
+    output.clear();
+    std::cerr << "GPU read requires MUSA runtime support\n";
+    return false;
+#endif
+}
+
 bool ParseOptions(int argc, char* argv[], Options& options) {
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument(argv[index]);
@@ -318,6 +453,24 @@ bool ParseOptions(int argc, char* argv[], Options& options) {
             if (!ParseUnsigned(value, options.block_size) ||
                 options.block_size == 0) {
                 std::cerr << "Invalid block size: " << value << '\n';
+                return false;
+            }
+        } else if (argument == "--gpu") {
+            std::uint64_t gpu_id = 0;
+            if (!ParseUnsigned(value, gpu_id) ||
+                gpu_id > static_cast<std::uint64_t>(
+                             std::numeric_limits<int>::max())) {
+                std::cerr << "Invalid GPU ID: " << value << '\n';
+                return false;
+            }
+            options.gpu_id = static_cast<int>(gpu_id);
+        } else if (argument == "--gpu-register") {
+            if (value == "io") {
+                options.musa_register_io = true;
+            } else if (value == "default") {
+                options.musa_register_io = false;
+            } else {
+                std::cerr << "--gpu-register must be io or default\n";
                 return false;
             }
         } else {
@@ -469,6 +622,139 @@ void PrintBlockAddress(const HostMappings& mappings,
     }
 }
 
+std::optional<pcie::KeyBlockLocation> ResolveKey(
+    coro_rpc::coro_rpc_client& client, std::string_view key) {
+    auto result = async_simple::coro::syncAwait(
+        client.call<&pcie::MasterService::Exist>(
+            pcie::ExistRequest{std::string(key)}));
+    if (!result) {
+        std::cerr << "RPC failed: " << result.error().msg << '\n';
+        return std::nullopt;
+    }
+    const auto& response = result.value();
+    if (response.code != pcie::RpcCode::kOk) {
+        std::cerr << "Exist: " << CodeName(response.code)
+                  << ", message=\"" << response.message << "\"\n";
+        return std::nullopt;
+    }
+    return pcie::KeyBlockLocation{std::string(key), response.host_id,
+                                  response.block_id};
+}
+
+std::optional<void*> WritableBlockAddress(const HostMappings& mappings,
+                                          const pcie::KeyBlockLocation& location,
+                                          std::uint64_t block_size,
+                                          std::uint64_t byte_count) {
+    const auto* mapping = mappings.FindMapping(location.host_id);
+    if (mapping == nullptr) {
+        std::cerr << "No mmap mapping for host_id=" << location.host_id << '\n';
+        return std::nullopt;
+    }
+    const auto offset = BlockOffset(location.block_id, block_size);
+    if (!offset || *offset > mapping->size || byte_count > mapping->size - *offset) {
+        std::cerr << "Block access exceeds mapped range for host_id="
+                  << location.host_id << ", block_id=" << location.block_id
+                  << '\n';
+        return std::nullopt;
+    }
+    return static_cast<std::byte*>(mapping->base) + *offset;
+}
+
+void DumpBytes(const std::vector<std::uint8_t>& bytes) {
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        if (index % 16 == 0) {
+            std::cout << "  0x" << std::hex << std::setw(8)
+                      << std::setfill('0') << index << ": ";
+        }
+        std::cout << std::hex << std::setw(2) << std::setfill('0')
+                  << static_cast<unsigned int>(bytes[index]) << ' ';
+        if (index % 16 == 15 || index + 1 == bytes.size()) {
+            std::cout << std::dec << std::setfill(' ') << '\n';
+        }
+    }
+}
+
+void WriteBlock(coro_rpc::coro_rpc_client& client,
+                std::istringstream& input,
+                const HostMappings& mappings,
+                std::uint64_t block_size,
+                const GpuAccessor& gpu) {
+    std::string key;
+    std::string value_text;
+    std::string size_text;
+    if (!(input >> key >> value_text)) {
+        std::cerr << "Usage: write <sha256_key> <byte_value> [size]\n";
+        return;
+    }
+    std::uint64_t value = 0;
+    std::uint64_t byte_count = block_size;
+    if (!ParseUnsigned(value_text, value) ||
+        value > std::numeric_limits<std::uint8_t>::max() ||
+        (input >> size_text && (!ParseUnsigned(size_text, byte_count) ||
+                                byte_count == 0)) ||
+        HasExtraToken(input)) {
+        std::cerr << "Usage: write <sha256_key> <byte_value<=0xff> [size]\n";
+        return;
+    }
+    const auto location = ResolveKey(client, key);
+    if (!location) {
+        return;
+    }
+    const auto address = WritableBlockAddress(
+        mappings, *location, block_size, byte_count);
+    if (!address) {
+        return;
+    }
+    if (!gpu.FillBlock(*address, byte_count, static_cast<std::uint8_t>(value))) {
+        return;
+    }
+    std::cout << "Write: OK, key=" << key
+              << ", host_id=" << location->host_id
+              << ", block_id=" << location->block_id
+              << ", bytes=" << byte_count
+              << ", value=0x" << std::hex << std::setw(2)
+              << std::setfill('0') << value << std::dec << std::setfill(' ')
+              << '\n';
+}
+
+void GetBlockValue(coro_rpc::coro_rpc_client& client,
+                   std::istringstream& input,
+                   const HostMappings& mappings,
+                   std::uint64_t block_size,
+                   const GpuAccessor& gpu) {
+    std::string key;
+    std::string size_text;
+    if (!(input >> key)) {
+        std::cerr << "Usage: get <sha256_key> [size]\n";
+        return;
+    }
+    std::uint64_t byte_count = 1;
+    if ((input >> size_text && (!ParseUnsigned(size_text, byte_count) ||
+                                byte_count == 0)) ||
+        HasExtraToken(input)) {
+        std::cerr << "Usage: get <sha256_key> [size]\n";
+        return;
+    }
+    const auto location = ResolveKey(client, key);
+    if (!location) {
+        return;
+    }
+    const auto address = WritableBlockAddress(
+        mappings, *location, block_size, byte_count);
+    if (!address) {
+        return;
+    }
+    std::vector<std::uint8_t> bytes;
+    if (!gpu.ReadBlock(*address, byte_count, bytes)) {
+        return;
+    }
+    std::cout << "Get: OK, key=" << key
+              << ", host_id=" << location->host_id
+              << ", block_id=" << location->block_id
+              << ", bytes=" << byte_count << '\n';
+    DumpBytes(bytes);
+}
+
 void ExistBlock(coro_rpc::coro_rpc_client& client,
                 std::istringstream& input,
                 const HostMappings& mappings,
@@ -564,7 +850,8 @@ void FreeBlocks(coro_rpc::coro_rpc_client& client,
 void RunInteractive(coro_rpc::coro_rpc_client& client,
                     pcie::HostId host_id,
                     const HostMappings& mappings,
-                    std::uint64_t block_size) {
+                    std::uint64_t block_size,
+                    const GpuAccessor& gpu) {
     PrintCommands();
     pcie::LineEditor editor;
     while (true) {
@@ -585,6 +872,10 @@ void RunInteractive(coro_rpc::coro_rpc_client& client,
             RegisterMemory(client, input, host_id);
         } else if (command == "alloc") {
             AllocBlocks(client, input, host_id);
+        } else if (command == "write") {
+            WriteBlock(client, input, mappings, block_size, gpu);
+        } else if (command == "get") {
+            GetBlockValue(client, input, mappings, block_size, gpu);
         } else if (command == "free") {
             FreeBlocks(client, input, host_id);
         } else if (command == "exist") {
@@ -628,8 +919,12 @@ int main(int argc, char* argv[]) {
     }
 
     HostMappings mappings;
+    GpuAccessor gpu;
     if (!options.config_path.empty()) {
         if (!mappings.Load(options.config_path)) {
+            return 1;
+        }
+        if (!gpu.Initialize(options.gpu_id, options.musa_register_io)) {
             return 1;
         }
         if (!RegisterConfiguredHost(client, mappings, options.host_id,
@@ -647,6 +942,6 @@ int main(int argc, char* argv[]) {
                   << ". CPU must not dereference these addresses directly; "
                      "use the GPU/DMA path.\n";
     }
-    RunInteractive(client, options.host_id, mappings, options.block_size);
+    RunInteractive(client, options.host_id, mappings, options.block_size, gpu);
     return 0;
 }
