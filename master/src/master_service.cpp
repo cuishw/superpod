@@ -37,23 +37,36 @@ std::string CanonicalKey(std::string_view key) {
 }
 
 template <typename Response>
+Response KeyValidationError(RpcCode code, std::string message) {
+    return Response{code, std::move(message), {}};
+}
+
+template <>
+BatchExistResponse KeyValidationError<BatchExistResponse>(
+    RpcCode code, std::string message) {
+    return {code, std::move(message), 0, 0, {}};
+}
+
+template <typename Response>
 std::optional<Response> ValidateKeys(const std::vector<std::string>& keys) {
     if (keys.empty()) {
-        return Response{RpcCode::kInvalidArgument,
-                        "at least one SHA-256 key is required", {}};
+        return KeyValidationError<Response>(
+            RpcCode::kInvalidArgument,
+            "at least one SHA-256 key is required");
     }
 
     std::unordered_set<std::string> unique_keys;
     unique_keys.reserve(keys.size());
     for (const auto& key : keys) {
         if (!IsSha256Key(key)) {
-            return Response{RpcCode::kInvalidKey,
-                            "key must be exactly 64 hexadecimal characters",
-                            {}};
+            return KeyValidationError<Response>(
+                RpcCode::kInvalidKey,
+                "key must be exactly 64 hexadecimal characters");
         }
         if (!unique_keys.insert(CanonicalKey(key)).second) {
-            return Response{RpcCode::kInvalidArgument,
-                            "the request contains a duplicate key", {}};
+            return KeyValidationError<Response>(
+                RpcCode::kInvalidArgument,
+                "the request contains a duplicate key");
         }
     }
     return std::nullopt;
@@ -207,7 +220,7 @@ FreeBlocksResponse MasterService::FreeBlocks(const FreeBlocksRequest& request) {
             static_cast<std::uint64_t>(request.keys.size())};
 }
 
-GetResponse MasterService::Get(const GetRequest& request) const {
+ExistResponse MasterService::Exist(const ExistRequest& request) const {
     if (!IsSha256Key(request.key)) {
         return {RpcCode::kInvalidKey,
                 "key must be exactly 64 hexadecimal characters", 0, 0};
@@ -220,6 +233,49 @@ GetResponse MasterService::Get(const GetRequest& request) const {
     }
     return {RpcCode::kOk, "key found", location->second.host_id,
             location->second.block_id};
+}
+
+BatchExistResponse MasterService::BatchExist(
+    const BatchExistRequest& request) const {
+    if (const auto error = ValidateKeys<BatchExistResponse>(request.keys)) {
+        return *error;
+    }
+
+    std::vector<std::string> canonical_keys;
+    canonical_keys.reserve(request.keys.size());
+    for (const auto& key : request.keys) {
+        canonical_keys.push_back(CanonicalKey(key));
+    }
+
+    std::shared_lock lock(mutex_);
+    std::unordered_map<HostId, std::vector<KeyBlockLocation>> matches_by_host;
+    matches_by_host.reserve(hosts_.size());
+    HostId best_host_id{};
+    std::size_t best_count = 0;
+
+    for (const auto& key : canonical_keys) {
+        const auto location = key_index_.find(key);
+        if (location == key_index_.end()) {
+            break;
+        }
+
+        auto& host_matches = matches_by_host[location->second.host_id];
+        host_matches.push_back(
+            {key, location->second.host_id, location->second.block_id});
+        if (host_matches.size() > best_count) {
+            best_host_id = location->second.host_id;
+            best_count = host_matches.size();
+        }
+    }
+
+    if (best_count == 0) {
+        return {RpcCode::kKeyNotFound, "first key is not allocated", 0, 0, {}};
+    }
+
+    auto matches = std::move(matches_by_host[best_host_id]);
+
+    return {RpcCode::kOk, "best host matches found", best_host_id,
+            static_cast<std::uint64_t>(matches.size()), std::move(matches)};
 }
 
 std::optional<MemoryRegistration> MasterService::FindHost(HostId host_id) const {

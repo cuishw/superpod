@@ -122,14 +122,44 @@ int main() {
               pcie::RpcCode::kKeyAlreadyExists,
           "a key cannot be allocated twice or moved to another host");
 
-    const auto found = allocator.Get({host_10_keys[1]});
+    const auto found = allocator.Exist({host_10_keys[1]});
     Check(found.code == pcie::RpcCode::kOk && found.host_id == 10 &&
               found.block_id == 1,
-          "Get resolves a key to its host and Block ID");
-    Check(allocator.Get({Key(999)}).code == pcie::RpcCode::kKeyNotFound,
-          "Get reports an unknown SHA-256 key");
-    Check(allocator.Get({"bad-key"}).code == pcie::RpcCode::kInvalidKey,
-          "Get validates SHA-256 key format");
+          "Exist resolves a key to its host and Block ID");
+    Check(allocator.Exist({Key(999)}).code == pcie::RpcCode::kKeyNotFound,
+          "Exist reports an unknown SHA-256 key");
+    Check(allocator.Exist({"bad-key"}).code == pcie::RpcCode::kInvalidKey,
+          "Exist validates SHA-256 key format");
+
+    const auto batch_same_host = allocator.BatchExist(
+        {{host_10_keys[0], host_10_keys[1], host_10_keys[2]}});
+    Check(batch_same_host.code == pcie::RpcCode::kOk &&
+              batch_same_host.host_id == 10 &&
+              batch_same_host.matched_count == 3 &&
+              batch_same_host.matches.size() == 3,
+          "BatchExist returns all ordered matches for one host");
+    CheckBlock(batch_same_host.matches[0].block_id, 0,
+               "BatchExist first Block ID");
+    CheckBlock(batch_same_host.matches[1].block_id, 1,
+               "BatchExist second Block ID");
+    CheckBlock(batch_same_host.matches[2].block_id, 2,
+               "BatchExist third Block ID");
+
+    const auto batch_host_mismatch = allocator.BatchExist(
+        {{host_10_keys[0], host_20_keys[0], host_10_keys[1]}});
+    Check(batch_host_mismatch.code == pcie::RpcCode::kOk &&
+              batch_host_mismatch.host_id == 10 &&
+              batch_host_mismatch.matched_count == 2 &&
+              batch_host_mismatch.matches.size() == 2,
+          "BatchExist returns the host with the most ordered matches");
+    Check(allocator.BatchExist({{Key(999), host_10_keys[0]}}).code ==
+              pcie::RpcCode::kKeyNotFound,
+          "BatchExist reports a missing first key");
+    Check(allocator.BatchExist({{host_10_keys[0], host_10_keys[0]}}).code ==
+              pcie::RpcCode::kInvalidArgument,
+          "BatchExist rejects duplicate keys");
+    Check(allocator.BatchExist({{"bad-key"}}).code == pcie::RpcCode::kInvalidKey,
+          "BatchExist validates SHA-256 key format");
 
     const auto freed = allocator.FreeBlocks(
         {10, {host_10_keys[2], host_10_keys[0]}});
@@ -162,7 +192,7 @@ int main() {
     Check(allocator.FreeBlocks({10, {host_10_keys[4]}}).code ==
               pcie::RpcCode::kOk,
           "valid key remains allocated after atomic validation failure");
-    Check(allocator.Get({host_10_keys[4]}).code == pcie::RpcCode::kKeyNotFound,
+    Check(allocator.Exist({host_10_keys[4]}).code == pcie::RpcCode::kKeyNotFound,
           "freed key is removed from the global index");
     Check(allocator.FreeBlocks({10, {host_10_keys[4]}}).code ==
               pcie::RpcCode::kKeyNotFound,
