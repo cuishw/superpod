@@ -248,23 +248,33 @@ BatchExistResponse MasterService::BatchExist(
     }
 
     std::shared_lock lock(mutex_);
-    const auto first_location = key_index_.find(canonical_keys.front());
-    if (first_location == key_index_.end()) {
+    std::unordered_map<HostId, std::vector<KeyBlockLocation>> matches_by_host;
+    matches_by_host.reserve(hosts_.size());
+    HostId best_host_id{};
+    std::size_t best_count = 0;
+
+    for (const auto& key : canonical_keys) {
+        const auto location = key_index_.find(key);
+        if (location == key_index_.end()) {
+            break;
+        }
+
+        auto& host_matches = matches_by_host[location->second.host_id];
+        host_matches.push_back(
+            {key, location->second.host_id, location->second.block_id});
+        if (host_matches.size() > best_count) {
+            best_host_id = location->second.host_id;
+            best_count = host_matches.size();
+        }
+    }
+
+    if (best_count == 0) {
         return {RpcCode::kKeyNotFound, "first key is not allocated", 0, 0, {}};
     }
 
-    const auto host_id = first_location->second.host_id;
-    std::vector<KeyBlockLocation> matches;
-    matches.reserve(canonical_keys.size());
-    for (const auto& key : canonical_keys) {
-        const auto location = key_index_.find(key);
-        if (location == key_index_.end() || location->second.host_id != host_id) {
-            break;
-        }
-        matches.push_back({key, host_id, location->second.block_id});
-    }
+    auto matches = std::move(matches_by_host[best_host_id]);
 
-    return {RpcCode::kOk, "matching prefix found", host_id,
+    return {RpcCode::kOk, "best host matches found", best_host_id,
             static_cast<std::uint64_t>(matches.size()), std::move(matches)};
 }
 

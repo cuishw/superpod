@@ -137,7 +137,7 @@ int main() {
               batch_same_host.host_id == 10 &&
               batch_same_host.matched_count == 3 &&
               batch_same_host.matches.size() == 3,
-          "BatchExist returns the matching prefix for one host");
+          "BatchExist returns all ordered matches for one host");
     CheckBlock(batch_same_host.matches[0].block_id, 0,
                "BatchExist first Block ID");
     CheckBlock(batch_same_host.matches[1].block_id, 1,
@@ -149,9 +149,9 @@ int main() {
         {{host_10_keys[0], host_20_keys[0], host_10_keys[1]}});
     Check(batch_host_mismatch.code == pcie::RpcCode::kOk &&
               batch_host_mismatch.host_id == 10 &&
-              batch_host_mismatch.matched_count == 1 &&
-              batch_host_mismatch.matches.size() == 1,
-          "BatchExist stops before a key owned by another host");
+              batch_host_mismatch.matched_count == 2 &&
+              batch_host_mismatch.matches.size() == 2,
+          "BatchExist returns the host with the most ordered matches");
     Check(allocator.BatchExist({{Key(999), host_10_keys[0]}}).code ==
               pcie::RpcCode::kKeyNotFound,
           "BatchExist reports a missing first key");

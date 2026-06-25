@@ -13,9 +13,9 @@
   key 找到 Block 后将其放回对应主机空闲队列尾部。
 - `Exist(ExistRequest)`：任何 Client 都可以查询指定 key，返回其所在的 `host_id`
   和 `block_id`。
-- `BatchExist(BatchExistRequest)`：按请求顺序查询一组 key，返回同一 `host_id`
-  下连续匹配前缀的 Block ID 列表和匹配个数；遇到缺失 key 或不同主机的 key
-  时立即停止。
+- `BatchExist(BatchExistRequest)`：按请求顺序查询一组 key，遇到缺失 key 时立即
+  停止，并在已匹配 key 涉及的多个 `host_id` 中返回匹配最多的主机及其
+  Block ID 列表和匹配个数；返回的 Block 必须都属于同一个 `host_id`。
 
 协议和 RPC 声明位于 `include/pcie/`，后续 Client 应复用这些头文件调用 RPC。
 注册信息目前仅保存在 Master 进程内存中，Master 重启后需要 Client 重新注册。
@@ -32,8 +32,8 @@
 - 注册：O(1)，元数据大小不随注册内存容量增长。
 - 分配：平均 O(申请 Block 数)，主机池定位平均 O(1)。
 - 释放：O(key 数量)，平均 O(1) 查询每个 key；整批请求原子成功或失败。
-- 批量查询：O(key 数量)，平均 O(1) 查询每个 key；结果只包含同一主机下的连续
-  匹配前缀。
+- 批量查询：O(key 数量)，平均 O(1) 查询每个 key；结果只包含匹配最多的同一
+  主机下的 Block。
 - 元数据空间：O(当前已分配 Block 数 + 已回收待复用 Block 数)。
 
 key 必须是恰好 64 个十六进制字符组成的 SHA-256 字符串，并在 Master 中全局
@@ -79,6 +79,27 @@ ctest --test-dir build --output-on-failure
 ./build/pcie_client --host-id 1 --host 127.0.0.1 --port 50051
 ```
 
+也可以让 Client 读取 physmap 配置文件并自动注册当前 `--host-id` 对应的内存：
+
+```bash
+./build/pcie_client --host-id 2 --config physmap.conf --block-size 0x1000
+```
+
+配置文件每行格式为 `<host_id> <char_device> <start_address> <size>`，数字支持十进制
+或 `0x` 前缀十六进制，例如：
+
+```text
+0 /dev/physmap0 0x0000008000000000 0x0000008000000000
+1 /dev/physmap2 0x0000420000000000 0x0000008000000000
+2 /dev/physmap3 0x0000440000000000 0x0000008000000000
+3 /dev/physmap4 0x0000460000000000 0x0000008000000000
+```
+
+Client 会打开并 `mmap` 文件中的每个字符设备，用 `--host-id` 对应行向 Master
+注册 `start_address`、`size` 和 `--block-size`。`exist`/`batch_exist` 返回远端
+Block 时，Client 会按 `mmap_base + block_id * block_size` 打印对应映射地址；
+这些 physmap 内存不能由 CPU 直接访问，应通过沐曦 GPU/DMA 路径使用。
+
 交互示例：
 
 ```text
@@ -91,7 +112,7 @@ AllocBlocks: OK, message="blocks allocated", host_id=1, blocks=2
 rpc> exist aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 Exist: OK, message="key found", host_id=1, block_id=0
 rpc> batch_exist aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-BatchExist: OK, message="matching prefix found", host_id=1, matched_count=2
+BatchExist: OK, message="best host matches found", host_id=1, matched_count=2
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> 1:0
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -> 1:1
 rpc> free aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
