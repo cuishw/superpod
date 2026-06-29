@@ -98,6 +98,35 @@ sudo physmap_mc_memtest --gpu 0 /dev/physmap0 read64 0x1000
 
 Use `--register default` instead of the default `--register io` if the mapped range should be registered with `mcHostRegisterDefault`.
 
+
+## Muxi GPU host-memory registration hold test
+
+`register_mm` is a small MUSA test program for checking whether a Muxi GPU can register a selected host-memory range. It registers the memory and then stays alive until Ctrl-C or SIGTERM so the registration can be inspected from another shell. Build and install it with the other MUSA tools:
+
+```sh
+make musa
+sudo install -m 0755 register_mm /usr/local/sbin/register_mm
+```
+
+The program can select the GPU, registration size, backing memory type, and whether `mcHostRegisterDefault` or `mcHostRegisterIoMemory` is used. Use `--register normal` for ordinary system memory and `--register mmio`/`--mmio` for MMIO, PCI BAR, or physmap mappings. Size and offset values accept decimal, `0x` hexadecimal, and binary suffixes such as `64M`, `1G`, or `2G`.
+
+```sh
+sudo register_mm --gpu 0 --size 1G --backing system
+sudo register_mm --gpu 0 --size 1G --backing mmap --register normal
+sudo register_mm --gpu 0 --size 256M --backing file --path /dev/physmap0 --register mmio
+sudo register_mm --gpu 0 --size 1G --backing file --path /sys/bus/pci/devices/0000:86:00.0/resource2 --offset 2G --mmio
+```
+
+Options:
+
+* `--gpu ID`: Muxi GPU device id, default `0`.
+* `--size BYTES`: registration size, default `64M`.
+* `--backing system|mmap|file`: allocate aligned system memory, anonymous `mmap` memory, or map a file/device/BAR path.
+* `--path PATH`: file, device, or PCI resource path required by `--backing file`.
+* `--offset BYTES`: page-aligned file/device mmap offset, default `0`.
+* `--register normal|mmio`: choose `mcHostRegisterDefault` or `mcHostRegisterIoMemory`; `--mmio` is a shortcut for MMIO mode.
+* `--no-touch`: skip pre-registration writes to the allocated buffer. File/device mappings are not touched by default.
+
 ## Muxi GPU bandwidth test tool
 
 `physmap_mc_bwtest` measures MUSA DMA bandwidth for host memory that is either allocated by `mcMallocHost` or mapped with `mmap` and registered with `mcHostRegister`. For physmap character devices, use `--host mmap-register --mode file --path /dev/physmapN --io`. The tool validates GPU write/read consistency with the selected byte value before measuring bandwidth, then reports read bandwidth first and write bandwidth second by default. Use `--direction read|write|both`, `--read-only`, or `--write-only` to limit the measured direction. Add `--continuous` to print live bandwidth updates until the process is terminated with Ctrl-C or SIGTERM.

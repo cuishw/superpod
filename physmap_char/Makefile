@@ -27,7 +27,7 @@ physmapctl: physmapctl.c physmap_ioctl.h
 physmap_memtest: physmap_memtest.c physmap_ioctl.h
 	$(CC) $(CFLAGS) -o $@ physmap_memtest.c
 
-musa: physmap_mc_memtest physmap_mc_bwtest
+musa: physmap_mc_memtest physmap_mc_bwtest register_mm
 
 physmap_mc_memtest: physmap_mc_memtest.c physmap_ioctl.h
 	$(MXCC) $(CFLAGS) -o $@ physmap_mc_memtest.c
@@ -35,8 +35,11 @@ physmap_mc_memtest: physmap_mc_memtest.c physmap_ioctl.h
 physmap_mc_bwtest: physmap_mc_bwtest.c
 	$(MXCC) $(CFLAGS) -o $@ physmap_mc_bwtest.c
 
+register_mm: register_mm.cu
+	$(MXCC) $(CFLAGS) -o $@ register_mm.cu
+
 clean:
-	$(RM) physmapctl physmap_memtest physmap_mc_memtest physmap_mc_bwtest
+	$(RM) physmapctl physmap_memtest physmap_mc_memtest physmap_mc_bwtest register_mm
 	@if [ -d "$(KDIR)" ]; then \
 		$(MAKE) -C $(KDIR) M=$(PWD) clean; \
 	else \
@@ -47,6 +50,7 @@ install: all
 	install -m 0755 physmapctl /usr/local/sbin/physmapctl
 	install -m 0755 physmap_memtest /usr/local/sbin/physmap_memtest
 
-install-musa: physmap_mc_memtest physmap_mc_bwtest
+install-musa: physmap_mc_memtest physmap_mc_bwtest register_mm
 	install -m 0755 physmap_mc_memtest /usr/local/sbin/physmap_mc_memtest
 	install -m 0755 physmap_mc_bwtest /usr/local/sbin/physmap_mc_bwtest
+	install -m 0755 register_mm /usr/local/sbin/register_mm
