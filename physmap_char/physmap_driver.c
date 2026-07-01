@@ -10,6 +10,7 @@
 #include <linux/overflow.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
@@ -22,6 +23,7 @@
 #define PHYSMAP_DEVICE_COUNT (PHYSMAP_MAX_MAPPINGS + 1)
 #define PHYSMAP_CTL_NAME "physmap_ctl"
 #define PHYSMAP_DATA_NAME "physmap%u"
+#define PHYSMAP_MMAP_VA_ALIGN (2UL * 1024 * 1024)
 
 struct physmap_region {
 	struct cdev cdev;
@@ -148,11 +150,39 @@ static int physmap_data_mmap(struct file *file, struct vm_area_struct *vma)
 				       vma->vm_page_prot);
 }
 
+static unsigned long physmap_data_get_unmapped_area(struct file *file,
+						    unsigned long addr,
+						    unsigned long len,
+						    unsigned long pgoff,
+						    unsigned long flags)
+{
+	unsigned long area;
+	unsigned long aligned;
+	unsigned long search_len;
+
+	if (flags & MAP_FIXED)
+		return addr;
+	if (len > ULONG_MAX - PHYSMAP_MMAP_VA_ALIGN)
+		return -ENOMEM;
+
+	search_len = len + PHYSMAP_MMAP_VA_ALIGN;
+	area = current->mm->get_unmapped_area(NULL, addr, search_len, pgoff, flags);
+	if (IS_ERR_VALUE(area))
+		return area;
+
+	aligned = ALIGN(area, PHYSMAP_MMAP_VA_ALIGN);
+	if (aligned < area || aligned > area + search_len - len)
+		return -ENOMEM;
+
+	return aligned;
+}
+
 static const struct file_operations physmap_data_fops = {
 	.owner = THIS_MODULE,
 	.open = physmap_data_open,
 	.release = physmap_data_release,
 	.mmap = physmap_data_mmap,
+	.get_unmapped_area = physmap_data_get_unmapped_area,
 	.llseek = noop_llseek,
 };
 
