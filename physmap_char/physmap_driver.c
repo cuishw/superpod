@@ -6,6 +6,7 @@
 #include <linux/fs.h>
 #include <linux/io.h>
 #include <linux/ioctl.h>
+#include <linux/mman.h>
 #include <linux/mm.h>
 #include <linux/overflow.h>
 #include <linux/module.h>
