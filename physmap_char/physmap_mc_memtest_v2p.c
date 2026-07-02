@@ -16,10 +16,12 @@
 #include <unistd.h>
 
 #include "physmap_ioctl.h"
+#include "map_va_to_pa.h"
 
 #define DEFAULT_CTL_DEV "/dev/physmap_ctl"
 #define DEFAULT_DEV_PATH "/dev/physmap0"
 #define DEFAULT_PAGE_SIZE 4096UL
+#define DEFAULT_MXCD_DEV "/dev/mxcd"
 
 #define CHECK_MC(call)                                                       \
 	do {                                                                     \
@@ -30,41 +32,6 @@
 			exit(EXIT_FAILURE);                                        \
 		}                                                                  \
 	} while (0)
-
-#define DEFAULT_MXCD_DEV "/dev/mxcd"
-#define MXCD_GPU_NODE_START 2
-#define MXCD_IOCTL_BASE 'K'
-#define MXCD_IOWR(nr, type) _IOWR(MXCD_IOCTL_BASE, nr, type)
-#define MXCD_IOC_VA_PA_MAP_FLAGS_SYSTEM (1U << 0)
-
-struct mxcd_ioctl_va_to_pa_args {
-	uint64_t va_addr;
-	uint64_t pa_addr;
-	uint32_t gpu_id;
-	uint32_t pte_flags;
-};
-
-struct mxcd_ioctl_va_pa_map_args {
-	uint64_t va_addr;
-	uint64_t pa_addr;
-	uint64_t size;
-	uint32_t gpu_id;
-	uint32_t map_flags;
-};
-
-struct mxcd_ioctl_va_pa_unmap_args {
-	uint64_t va_addr;
-	uint64_t size;
-	uint32_t gpu_id;
-	uint32_t map_flags;
-};
-
-#define MXCD_IOC_VA_TO_PA \
-	MXCD_IOWR(0x11, struct mxcd_ioctl_va_to_pa_args)
-#define MXCD_IOC_VA_PA_MAP \
-	MXCD_IOWR(0x4d, struct mxcd_ioctl_va_pa_map_args)
-#define MXCD_IOC_VA_PA_UNMAP \
-	MXCD_IOWR(0x4e, struct mxcd_ioctl_va_pa_unmap_args)
 
 struct options {
 	int gpu;
@@ -321,113 +288,6 @@ static void *map_physmem(int fd, uint64_t device_size, uint64_t target_offset,
 	return map_addr;
 }
 
-static int xioctl(int fd, unsigned long request, void *arg, const char *name)
-{
-	if (ioctl(fd, request, arg) == 0)
-		return 0;
-
-	fprintf(stderr, "%s failed: %s\n", name, strerror(errno));
-	return -1;
-}
-
-static uint32_t gpu_index_to_id(uint32_t gpu_index)
-{
-	char path[160];
-	FILE *fp;
-	uint32_t gpu_id;
-	int ret;
-
-	ret = snprintf(path, sizeof(path),
-		       "/sys/devices/virtual/mxcd/mxcd/layout/nodes/%u/gpu_id",
-		       gpu_index + MXCD_GPU_NODE_START);
-	if (ret < 0 || (size_t)ret >= sizeof(path)) {
-		fprintf(stderr, "gpu_id sysfs path is too long\n");
-		exit(EXIT_FAILURE);
-	}
-
-	fp = fopen(path, "r");
-	if (!fp) {
-		fprintf(stderr, "open %s failed: %s\n", path, strerror(errno));
-		exit(EXIT_FAILURE);
-	}
-
-	if (fscanf(fp, "%u", &gpu_id) != 1) {
-		fprintf(stderr, "read gpu_id from %s failed\n", path);
-		fclose(fp);
-		exit(EXIT_FAILURE);
-	}
-
-	fclose(fp);
-	printf("gpu index %u -> node %u -> gpu_id %u\n",
-	       gpu_index, gpu_index + MXCD_GPU_NODE_START, gpu_id);
-
-	return gpu_id;
-}
-
-static int register_mapping(const struct options *opt, int ioctl_fd,
-			    void *map_addr, uint64_t phys_addr,
-			    uint64_t map_size)
-{
-	struct mxcd_ioctl_va_pa_map_args map = { 0 };
-	struct mxcd_ioctl_va_to_pa_args va_to_pa = { 0 };
-
-	map.va_addr = (uint64_t)(uintptr_t)map_addr;
-	map.pa_addr = phys_addr;
-	map.size = map_size;
-	map.gpu_id = opt->gpu_id;
-	if (opt->system_mem)
-		map.map_flags |= MXCD_IOC_VA_PA_MAP_FLAGS_SYSTEM;
-
-	if (xioctl(ioctl_fd, MXCD_IOC_VA_PA_MAP, &map, "VA_PA_MAP"))
-		return -1;
-
-	va_to_pa.gpu_id = map.gpu_id;
-	va_to_pa.va_addr = map.va_addr;
-	if (xioctl(ioctl_fd, MXCD_IOC_VA_TO_PA, &va_to_pa, "VA_TO_PA")) {
-		struct mxcd_ioctl_va_pa_unmap_args unmap = { 0 };
-
-		unmap.va_addr = map.va_addr;
-		unmap.size = map.size;
-		unmap.gpu_id = map.gpu_id;
-		unmap.map_flags = map.map_flags;
-		xioctl(ioctl_fd, MXCD_IOC_VA_PA_UNMAP, &unmap, "VA_PA_UNMAP");
-		return -1;
-	}
-
-	printf("registered va 0x%llx -> pa 0x%llx, expected pa 0x%llx\n",
-	       (unsigned long long)map.va_addr,
-	       (unsigned long long)va_to_pa.pa_addr,
-	       (unsigned long long)map.pa_addr);
-	if (va_to_pa.pa_addr != map.pa_addr) {
-		struct mxcd_ioctl_va_pa_unmap_args unmap = { 0 };
-
-		fprintf(stderr, "verify failed: mapped pa mismatch\n");
-		unmap.va_addr = map.va_addr;
-		unmap.size = map.size;
-		unmap.gpu_id = map.gpu_id;
-		unmap.map_flags = map.map_flags;
-		xioctl(ioctl_fd, MXCD_IOC_VA_PA_UNMAP, &unmap, "VA_PA_UNMAP");
-		return -1;
-	}
-
-	return 0;
-}
-
-static void unregister_mapping(const struct options *opt, int ioctl_fd,
-			       void *map_addr, uint64_t map_size)
-{
-	struct mxcd_ioctl_va_pa_unmap_args unmap = { 0 };
-
-	unmap.va_addr = (uint64_t)(uintptr_t)map_addr;
-	unmap.size = map_size;
-	unmap.gpu_id = opt->gpu_id;
-	if (opt->system_mem)
-		unmap.map_flags |= MXCD_IOC_VA_PA_MAP_FLAGS_SYSTEM;
-
-	if (xioctl(ioctl_fd, MXCD_IOC_VA_PA_UNMAP, &unmap, "VA_PA_UNMAP"))
-		exit(EXIT_FAILURE);
-}
-
 static void wait_for_unregister(void)
 {
 	int ch;
@@ -438,7 +298,7 @@ static void wait_for_unregister(void)
 		;
 }
 
-static void do_gpu_read(const struct options *opt, int fd, int ioctl_fd,
+static void do_gpu_read(const struct options *opt, int fd,
 			uint64_t phys_addr, uint64_t device_size,
 			uint64_t offset, uint64_t size)
 {
@@ -448,7 +308,8 @@ static void do_gpu_read(const struct options *opt, int fd, int ioctl_fd,
 	uint8_t *h_dump;
 
 	map_addr = map_physmem(fd, device_size, offset, size, &offset_in_map);
-	if (register_mapping(opt, ioctl_fd, map_addr, phys_addr, device_size))
+	if (map_va_to_pa(opt->gpu_id, (uint64_t)(uintptr_t)map_addr, phys_addr,
+			 device_size, opt->system_mem))
 		exit(EXIT_FAILURE);
 	h_dump = malloc((size_t)size);
 	if (!h_dump) {
@@ -474,11 +335,13 @@ static void do_gpu_read(const struct options *opt, int fd, int ioctl_fd,
 	CHECK_MC(mcFree(d_buf));
 	free(h_dump);
 	wait_for_unregister();
-	unregister_mapping(opt, ioctl_fd, map_addr, device_size);
+	if (unmap_va_to_pa(opt->gpu_id, (uint64_t)(uintptr_t)map_addr,
+				   device_size, opt->system_mem))
+		exit(EXIT_FAILURE);
 	munmap(map_addr, (size_t)device_size);
 }
 
-static void do_gpu_write(const struct options *opt, int fd, int ioctl_fd,
+static void do_gpu_write(const struct options *opt, int fd,
 			 uint64_t phys_addr, uint64_t device_size,
 			 uint64_t offset, uint64_t size, uint8_t value)
 {
@@ -487,7 +350,8 @@ static void do_gpu_write(const struct options *opt, int fd, int ioctl_fd,
 	void *d_buf = NULL;
 
 	map_addr = map_physmem(fd, device_size, offset, size, &offset_in_map);
-	if (register_mapping(opt, ioctl_fd, map_addr, phys_addr, device_size))
+	if (map_va_to_pa(opt->gpu_id, (uint64_t)(uintptr_t)map_addr, phys_addr,
+			 device_size, opt->system_mem))
 		exit(EXIT_FAILURE);
 
 	CHECK_MC(mcMalloc(&d_buf, (size_t)size));
@@ -508,7 +372,9 @@ static void do_gpu_write(const struct options *opt, int fd, int ioctl_fd,
 
 	CHECK_MC(mcFree(d_buf));
 	wait_for_unregister();
-	unregister_mapping(opt, ioctl_fd, map_addr, device_size);
+	if (unmap_va_to_pa(opt->gpu_id, (uint64_t)(uintptr_t)map_addr,
+				   device_size, opt->system_mem))
+		exit(EXIT_FAILURE);
 	munmap(map_addr, (size_t)device_size);
 }
 
@@ -544,7 +410,6 @@ int main(int argc, char **argv)
 	const char *cmd;
 	int argi;
 	int fd;
-	int ioctl_fd;
 
 	if (argc < 2) {
 		usage(argv[0]);
@@ -568,15 +433,9 @@ int main(int argc, char **argv)
 
 	CHECK_MC(mcSetDevice(opt.gpu));
 	opt.gpu_id = gpu_index_to_id((uint32_t)opt.gpu);
-	ioctl_fd = open(DEFAULT_MXCD_DEV, O_RDWR | O_CLOEXEC);
-	if (ioctl_fd < 0) {
-		fprintf(stderr, "open %s failed: %s\n", DEFAULT_MXCD_DEV, strerror(errno));
-		return EXIT_FAILURE;
-	}
 	fd = open(dev_info.path, O_RDWR | O_SYNC | O_CLOEXEC);
 	if (fd < 0) {
 		fprintf(stderr, "open %s failed: %s\n", dev_info.path, strerror(errno));
-		close(ioctl_fd);
 		return EXIT_FAILURE;
 	}
 
@@ -584,20 +443,18 @@ int main(int argc, char **argv)
 		if (argc - argi != 2) {
 			usage(argv[0]);
 			close(fd);
-			close(ioctl_fd);
 			return EXIT_FAILURE;
 		}
-		do_gpu_read(&opt, fd, ioctl_fd, dev_info.phys_addr, dev_info.size,
+		do_gpu_read(&opt, fd, dev_info.phys_addr, dev_info.size,
 			    parse_u64_arg(argv[argi], "offset"),
 			    parse_u64_arg(argv[argi + 1], "size"));
 	} else if (!strcmp(cmd, "write")) {
 		if (argc - argi != 3) {
 			usage(argv[0]);
 			close(fd);
-			close(ioctl_fd);
 			return EXIT_FAILURE;
 		}
-		do_gpu_write(&opt, fd, ioctl_fd, dev_info.phys_addr, dev_info.size,
+		do_gpu_write(&opt, fd, dev_info.phys_addr, dev_info.size,
 			     parse_u64_arg(argv[argi], "offset"),
 			     parse_u64_arg(argv[argi + 1], "size"),
 			     parse_u8_arg(argv[argi + 2], "byte_value"));
@@ -605,11 +462,9 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Unknown command: %s\n", cmd);
 		usage(argv[0]);
 		close(fd);
-		close(ioctl_fd);
 		return EXIT_FAILURE;
 	}
 
 	close(fd);
-	close(ioctl_fd);
 	return EXIT_SUCCESS;
 }
