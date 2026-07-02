@@ -22,7 +22,6 @@
 #define DEFAULT_DEV_PATH "/dev/physmap0"
 #define DEFAULT_PAGE_SIZE 4096UL
 #define DEFAULT_MXCD_DEV "/dev/mxcd"
-#define MXCD_GPU_NODE_START 2
 
 #define CHECK_MC(call)                                                       \
 	do {                                                                     \
@@ -287,40 +286,6 @@ static void *map_physmem(int fd, uint64_t device_size, uint64_t target_offset,
 
 	*offset_in_map_out = target_offset;
 	return map_addr;
-}
-
-static uint32_t gpu_index_to_id(uint32_t gpu_index)
-{
-	char path[160];
-	FILE *fp;
-	uint32_t gpu_id;
-	int ret;
-
-	ret = snprintf(path, sizeof(path),
-		       "/sys/devices/virtual/mxcd/mxcd/layout/nodes/%u/gpu_id",
-		       gpu_index + MXCD_GPU_NODE_START);
-	if (ret < 0 || (size_t)ret >= sizeof(path)) {
-		fprintf(stderr, "gpu_id sysfs path is too long\n");
-		exit(EXIT_FAILURE);
-	}
-
-	fp = fopen(path, "r");
-	if (!fp) {
-		fprintf(stderr, "open %s failed: %s\n", path, strerror(errno));
-		exit(EXIT_FAILURE);
-	}
-
-	if (fscanf(fp, "%u", &gpu_id) != 1) {
-		fprintf(stderr, "read gpu_id from %s failed\n", path);
-		fclose(fp);
-		exit(EXIT_FAILURE);
-	}
-
-	fclose(fp);
-	printf("gpu index %u -> node %u -> gpu_id %u\n",
-	       gpu_index, gpu_index + MXCD_GPU_NODE_START, gpu_id);
-
-	return gpu_id;
 }
 
 static void wait_for_unregister(void)

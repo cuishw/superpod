@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -14,6 +15,7 @@
 #define MXCD_IOCTL_BASE 'K'
 #define MXCD_IOWR(nr, type) _IOWR(MXCD_IOCTL_BASE, nr, type)
 #define MXCD_IOC_VA_PA_MAP_FLAGS_SYSTEM (1U << 0)
+#define MXCD_GPU_NODE_START 2
 
 struct mxcd_ioctl_va_to_pa_args {
 	uint64_t va_addr;
@@ -61,6 +63,40 @@ static int open_mxcd(void)
 		fprintf(stderr, "open %s failed: %s\n", DEFAULT_MXCD_DEV,
 			strerror(errno));
 	return fd;
+}
+
+uint32_t gpu_index_to_id(uint32_t gpu_index)
+{
+	char path[160];
+	FILE *fp;
+	uint32_t gpu_id;
+	int ret;
+
+	ret = snprintf(path, sizeof(path),
+		       "/sys/devices/virtual/mxcd/mxcd/layout/nodes/%u/gpu_id",
+		       gpu_index + MXCD_GPU_NODE_START);
+	if (ret < 0 || (size_t)ret >= sizeof(path)) {
+		fprintf(stderr, "gpu_id sysfs path is too long\n");
+		exit(EXIT_FAILURE);
+	}
+
+	fp = fopen(path, "r");
+	if (!fp) {
+		fprintf(stderr, "open %s failed: %s\n", path, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	if (fscanf(fp, "%u", &gpu_id) != 1) {
+		fprintf(stderr, "read gpu_id from %s failed\n", path);
+		fclose(fp);
+		exit(EXIT_FAILURE);
+	}
+
+	fclose(fp);
+	printf("gpu index %u -> node %u -> gpu_id %u\n",
+	       gpu_index, gpu_index + MXCD_GPU_NODE_START, gpu_id);
+
+	return gpu_id;
 }
 
 int map_va_to_pa(uint32_t gpu_id, uint64_t va_addr, uint64_t pa_addr,
