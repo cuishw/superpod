@@ -58,6 +58,7 @@ struct options {
 	int device;
 	uint32_t gpu_id;
 	uint8_t write_value;
+	int is_cpu_mem;
 	unsigned int test_mask;
 	int continuous;
 };
@@ -194,7 +195,7 @@ static void usage(const char *prog)
 	printf("Usage:\n");
 	printf("  %s [--size MB] [--offset BYTES] [--iters N] [--gpu ID]\n", prog);
 	printf("     [--direction read|write|both] [--read-only] [--write-only]\n");
-	printf("     [--continuous] [--path DEVICE|device]\n\n");
+	printf("     [--continuous] [--is_cpu_mem] [--path DEVICE|device]\n\n");
 	printf("Maps the full physmap character device, registers that complete VA range\n");
 	printf("with map_va_to_pa(), and measures DMA bandwidth on the requested subrange.\n");
 	printf("The physical address and map size are resolved from %s.\n\n",
@@ -208,6 +209,7 @@ static void usage(const char *prog)
 	printf("  --gpu ID              GPU id, default 0\n");
 	printf("  --path DEVICE         physmap device path or identifier, default %s\n",
 	       DEFAULT_DEV_PATH);
+	printf("  --is_cpu_mem          pass CPU/system-memory flag to VA/PA map and unmap (default on)\n");
 	printf("  --direction MODE      test read, write, or both directions, default both\n");
 	printf("  --read-only           only test GPU read / host-to-device bandwidth\n");
 	printf("  --write-only          only test GPU write / device-to-host bandwidth\n");
@@ -229,6 +231,7 @@ static void parse_args(int argc, char **argv, struct options *opt)
 	opt->device = 0;
 	opt->gpu_id = 0;
 	opt->write_value = DEFAULT_WRITE_VALUE;
+	opt->is_cpu_mem = 1;
 	opt->test_mask = TEST_READ | TEST_WRITE;
 	opt->continuous = 0;
 
@@ -261,6 +264,8 @@ static void parse_args(int argc, char **argv, struct options *opt)
 			opt->test_mask = TEST_WRITE;
 		} else if (!strcmp(argv[i], "--continuous")) {
 			opt->continuous = 1;
+		} else if (!strcmp(argv[i], "--is_cpu_mem")) {
+			opt->is_cpu_mem = 1;
 		} else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
 			usage(argv[0]);
 			exit(EXIT_SUCCESS);
@@ -312,7 +317,7 @@ static struct host_buffer alloc_host_buffer(const struct options *opt)
 	h.data = (uint8_t *)h.base + opt->offset_bytes;
 
 	if (map_va_to_pa(opt->gpu_id, (uint64_t)(uintptr_t)h.base, opt->phys_addr,
-			 opt->map_size_bytes, 0))
+			 opt->map_size_bytes, opt->is_cpu_mem))
 		exit(EXIT_FAILURE);
 	return h;
 }
@@ -323,7 +328,7 @@ static void free_host_buffer(const struct options *opt, struct host_buffer *h)
 		return;
 
 	if (unmap_va_to_pa(opt->gpu_id, (uint64_t)(uintptr_t)h->base,
-			 opt->map_size_bytes, 0))
+			 opt->map_size_bytes, opt->is_cpu_mem))
 		exit(EXIT_FAILURE);
 	munmap(h->base, (size_t)opt->map_size_bytes);
 	if (h->fd >= 0)
@@ -417,6 +422,7 @@ static void print_test_config(const struct options *opt, size_t size,
 	       (unsigned long long)opt->phys_addr);
 	printf("register size     : 0x%llx bytes\n",
 	       (unsigned long long)opt->map_size_bytes);
+	printf("is cpu mem        : %s\n", opt->is_cpu_mem ? "yes" : "no");
 	printf("buffer size       : %.2f MiB\n", (double)size / 1024.0 / 1024.0);
 	printf("iterations        : %d%s\n", opt->iterations,
 	       opt->continuous ? " per update" : "");
