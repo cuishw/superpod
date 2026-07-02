@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include <mc_runtime.h>
 
@@ -92,22 +94,29 @@ static void handle_stop_signal(int sig)
 }
 
 
-static __global__ void sm_copy_kernel(uint8_t *dst, const uint8_t *src,
+static __global__ void sm_copy_kernel(uint8_t *__restrict__ dst,
+				      const uint8_t *__restrict__ src,
 				      size_t size)
 {
 	size_t tid = (size_t)blockIdx.x * (size_t)blockDim.x +
 		     (size_t)threadIdx.x;
-	size_t stride = (size_t)blockDim.x * (size_t)gridDim.x;
+	size_t total_threads = (size_t)gridDim.x * (size_t)blockDim.x;
+	size_t chunk_size = (size + total_threads - 1) / total_threads;
+	size_t start = tid * chunk_size;
+	size_t end = start + chunk_size;
 
-	for (size_t i = tid; i < size; i += stride)
+	if (end > size)
+		end = size;
+
+	for (size_t i = start; i < end; i++)
 		dst[i] = src[i];
 }
 
 static void launch_sm_copy(void *dst, const void *src, size_t size,
 			   mcStream_t stream)
 {
-	uint8_t *dst_arg = dst;
-	const uint8_t *src_arg = src;
+	uint8_t *dst_arg = (uint8_t *)dst;
+	const uint8_t *src_arg = (const uint8_t *)src;
 	void *args[] = { &dst_arg, &src_arg, &size };
 	unsigned int blocks = (unsigned int)((size + SM_COPY_THREADS - 1) /
 					     SM_COPY_THREADS);
@@ -167,7 +176,9 @@ static void resolve_device_info(const char *device, char *path_buf,
 				 size_t path_buf_len,
 				 struct physmap_device_info *info)
 {
-	struct physmap_list_req req = { 0 };
+	struct physmap_list_req req;
+
+	memset(&req, 0, sizeof(req));
 	const char *lookup = (!device || !*device) ? DEFAULT_DEV_PATH : device;
 	uint32_t count;
 
@@ -375,7 +386,9 @@ static void *mmap_host_buffer(const struct options *opt, int *fd_out)
 
 static struct host_buffer alloc_host_buffer(const struct options *opt)
 {
-	struct host_buffer h = { 0 };
+	struct host_buffer h;
+
+	memset(&h, 0, sizeof(h));
 
 	h.fd = -1;
 	h.base = mmap_host_buffer(opt, &h.fd);
@@ -407,7 +420,7 @@ static void validate_read_write(const struct options *opt, void *h_buf,
 				void *d_buf, size_t size, uint8_t value,
 				mcStream_t stream)
 {
-	uint8_t *check = malloc(size);
+	uint8_t *check = (uint8_t *)malloc(size);
 
 	if (!check) {
 		fprintf(stderr, "malloc validation buffer failed: %s\n", strerror(errno));
