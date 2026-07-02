@@ -28,6 +28,8 @@
 
 #define TEST_READ  (1U << 0)
 #define TEST_WRITE (1U << 1)
+#define SM_COPY_THREADS 256U
+#define SM_COPY_MAX_BLOCKS 65535U
 
 #define CHECK_MC(call)                                                       \
 	do {                                                                     \
@@ -47,6 +49,11 @@
 		}                                                                  \
 	} while (0)
 
+enum copy_engine {
+	ENGINE_DMA,
+	ENGINE_SM,
+};
+
 struct options {
 	const char *device_arg;
 	const char *path;
@@ -58,6 +65,7 @@ struct options {
 	int device;
 	uint32_t gpu_id;
 	uint8_t write_value;
+	enum copy_engine engine;
 	int is_cpu_mem;
 	unsigned int test_mask;
 	int continuous;
@@ -81,6 +89,44 @@ static void handle_stop_signal(int sig)
 {
 	(void)sig;
 	stop_requested = 1;
+}
+
+
+static __global__ void sm_copy_kernel(uint8_t *dst, const uint8_t *src,
+				      size_t size)
+{
+	size_t tid = (size_t)blockIdx.x * (size_t)blockDim.x +
+		     (size_t)threadIdx.x;
+	size_t stride = (size_t)blockDim.x * (size_t)gridDim.x;
+
+	for (size_t i = tid; i < size; i += stride)
+		dst[i] = src[i];
+}
+
+static void launch_sm_copy(void *dst, const void *src, size_t size,
+			   mcStream_t stream)
+{
+	uint8_t *dst_arg = dst;
+	const uint8_t *src_arg = src;
+	void *args[] = { &dst_arg, &src_arg, &size };
+	unsigned int blocks = (unsigned int)((size + SM_COPY_THREADS - 1) /
+					     SM_COPY_THREADS);
+	dim3 grid;
+	dim3 block;
+
+	if (blocks == 0)
+		blocks = 1;
+	if (blocks > SM_COPY_MAX_BLOCKS)
+		blocks = SM_COPY_MAX_BLOCKS;
+
+	grid.x = blocks;
+	grid.y = 1;
+	grid.z = 1;
+	block.x = SM_COPY_THREADS;
+	block.y = 1;
+	block.z = 1;
+	CHECK_MC(mcLaunchKernel((const void *)sm_copy_kernel, grid, block, args, 0,
+				stream));
 }
 
 static void read_physmap_list(struct physmap_list_req *req, const char *what)
@@ -195,6 +241,7 @@ static void usage(const char *prog)
 	printf("Usage:\n");
 	printf("  %s [--size MB] [--offset BYTES] [--iters N] [--gpu ID]\n", prog);
 	printf("     [--direction read|write|both] [--read-only] [--write-only]\n");
+	printf("     [--engine dma|sm] [--dma|--sm]\n");
 	printf("     [--continuous] [--is_cpu_mem] [--path DEVICE|device]\n\n");
 	printf("Maps the full physmap character device, registers that complete VA range\n");
 	printf("with map_va_to_pa(), and measures DMA bandwidth on the requested subrange.\n");
@@ -209,6 +256,9 @@ static void usage(const char *prog)
 	printf("  --gpu ID              GPU id, default 0\n");
 	printf("  --path DEVICE         physmap device path or identifier, default %s\n",
 	       DEFAULT_DEV_PATH);
+	printf("  --engine dma|sm       copy engine: mcMemcpy DMA or SM core kernel, default dma\n");
+	printf("  --dma                 use existing mcMemcpy DMA bandwidth path\n");
+	printf("  --sm                  use SM core kernel copy bandwidth path\n");
 	printf("  --is_cpu_mem          pass CPU/system-memory flag to VA/PA map and unmap (default on)\n");
 	printf("  --direction MODE      test read, write, or both directions, default both\n");
 	printf("  --read-only           only test GPU read / host-to-device bandwidth\n");
@@ -231,6 +281,7 @@ static void parse_args(int argc, char **argv, struct options *opt)
 	opt->device = 0;
 	opt->gpu_id = 0;
 	opt->write_value = DEFAULT_WRITE_VALUE;
+	opt->engine = ENGINE_DMA;
 	opt->is_cpu_mem = 1;
 	opt->test_mask = TEST_READ | TEST_WRITE;
 	opt->continuous = 0;
@@ -246,6 +297,20 @@ static void parse_args(int argc, char **argv, struct options *opt)
 			opt->iterations = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--gpu") && i + 1 < argc) {
 			opt->device = atoi(argv[++i]);
+		} else if (!strcmp(argv[i], "--engine") && i + 1 < argc) {
+			i++;
+			if (!strcmp(argv[i], "dma"))
+				opt->engine = ENGINE_DMA;
+			else if (!strcmp(argv[i], "sm"))
+				opt->engine = ENGINE_SM;
+			else {
+				usage(argv[0]);
+				exit(EXIT_FAILURE);
+			}
+		} else if (!strcmp(argv[i], "--dma")) {
+			opt->engine = ENGINE_DMA;
+		} else if (!strcmp(argv[i], "--sm")) {
+			opt->engine = ENGINE_SM;
 		} else if (!strcmp(argv[i], "--direction") && i + 1 < argc) {
 			i++;
 			if (!strcmp(argv[i], "read"))
@@ -338,8 +403,9 @@ static void free_host_buffer(const struct options *opt, struct host_buffer *h)
 	h->fd = -1;
 }
 
-static void validate_read_write(void *h_buf, void *d_buf, size_t size,
-				uint8_t value, mcStream_t stream)
+static void validate_read_write(const struct options *opt, void *h_buf,
+				void *d_buf, size_t size, uint8_t value,
+				mcStream_t stream)
 {
 	uint8_t *check = malloc(size);
 
@@ -349,8 +415,13 @@ static void validate_read_write(void *h_buf, void *d_buf, size_t size,
 	}
 
 	CHECK_MC(mcMemset(d_buf, value, size));
-	CHECK_MC(mcMemcpyAsync(h_buf, d_buf, size, mcMemcpyDeviceToHost, stream));
-	CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice, stream));
+	if (opt->engine == ENGINE_DMA) {
+		CHECK_MC(mcMemcpyAsync(h_buf, d_buf, size, mcMemcpyDeviceToHost, stream));
+		CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice, stream));
+	} else {
+		launch_sm_copy(h_buf, d_buf, size, stream);
+		launch_sm_copy(d_buf, h_buf, size, stream);
+	}
 	CHECK_MC(mcMemcpyAsync(check, d_buf, size, mcMemcpyDeviceToHost, stream));
 	CHECK_MC(mcStreamSynchronize(stream));
 
@@ -375,16 +446,34 @@ static double elapsed_bandwidth_gb(uint64_t bytes, float ms)
 	return bytes_to_gb(bytes) / ((double)ms / 1000.0);
 }
 
-static double measure_read_bandwidth(void *h_buf, void *d_buf, size_t size,
-				     int iterations, mcStream_t stream,
+static const char *engine_name(enum copy_engine engine)
+{
+	switch (engine) {
+	case ENGINE_DMA:
+		return "mcMemcpy DMA";
+	case ENGINE_SM:
+		return "SM core kernel";
+	default:
+		return "unknown";
+	}
+}
+
+static double measure_read_bandwidth(const struct options *opt, void *h_buf,
+				     void *d_buf, size_t size, int iterations,
+				     mcStream_t stream,
 				     mcEvent_t start, mcEvent_t stop)
 {
 	float ms = 0.0f;
 	uint64_t total_bytes = (uint64_t)size * (uint64_t)iterations;
 
 	CHECK_MC(mcEventRecord(start, stream));
-	for (int i = 0; i < iterations; i++)
-		CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice, stream));
+	for (int i = 0; i < iterations; i++) {
+		if (opt->engine == ENGINE_DMA)
+			CHECK_MC(mcMemcpyAsync(d_buf, h_buf, size, mcMemcpyHostToDevice,
+					       stream));
+		else
+			launch_sm_copy(d_buf, h_buf, size, stream);
+	}
 	CHECK_MC(mcEventRecord(stop, stream));
 	CHECK_MC(mcEventSynchronize(stop));
 	CHECK_MC(mcEventElapsedTime(&ms, start, stop));
@@ -392,16 +481,22 @@ static double measure_read_bandwidth(void *h_buf, void *d_buf, size_t size,
 	return elapsed_bandwidth_gb(total_bytes, ms);
 }
 
-static double measure_write_bandwidth(void *h_buf, void *d_buf, size_t size,
-				      int iterations, mcStream_t stream,
+static double measure_write_bandwidth(const struct options *opt, void *h_buf,
+				      void *d_buf, size_t size, int iterations,
+				      mcStream_t stream,
 				      mcEvent_t start, mcEvent_t stop)
 {
 	float ms = 0.0f;
 	uint64_t total_bytes = (uint64_t)size * (uint64_t)iterations;
 
 	CHECK_MC(mcEventRecord(start, stream));
-	for (int i = 0; i < iterations; i++)
-		CHECK_MC(mcMemcpyAsync(h_buf, d_buf, size, mcMemcpyDeviceToHost, stream));
+	for (int i = 0; i < iterations; i++) {
+		if (opt->engine == ENGINE_DMA)
+			CHECK_MC(mcMemcpyAsync(h_buf, d_buf, size, mcMemcpyDeviceToHost,
+					       stream));
+		else
+			launch_sm_copy(h_buf, d_buf, size, stream);
+	}
 	CHECK_MC(mcEventRecord(stop, stream));
 	CHECK_MC(mcEventSynchronize(stop));
 	CHECK_MC(mcEventElapsedTime(&ms, start, stop));
@@ -418,6 +513,7 @@ static void print_test_config(const struct options *opt, size_t size,
 	       (unsigned long long)opt->offset_bytes,
 	       (double)opt->offset_bytes / 1024.0 / 1024.0);
 	printf("register method   : map_va_to_pa KMD ioctl\n");
+	printf("copy engine       : %s\n", engine_name(opt->engine));
 	printf("register pa       : 0x%llx\n",
 	       (unsigned long long)opt->phys_addr);
 	printf("register size     : 0x%llx bytes\n",
@@ -451,10 +547,15 @@ static void run_test(const struct options *opt)
 	CHECK_MC(mcEventCreate(&start));
 	CHECK_MC(mcEventCreate(&stop));
 
-	validate_read_write(h_buf.data, d_buf, size, opt->write_value, stream);
+	validate_read_write(opt, h_buf.data, d_buf, size, opt->write_value, stream);
 
-	for (int i = 0; i < 5; i++)
-		CHECK_MC(mcMemcpyAsync(d_buf, h_buf.data, size, mcMemcpyHostToDevice, stream));
+	for (int i = 0; i < 5; i++) {
+		if (opt->engine == ENGINE_DMA)
+			CHECK_MC(mcMemcpyAsync(d_buf, h_buf.data, size, mcMemcpyHostToDevice,
+					       stream));
+		else
+			launch_sm_copy(d_buf, h_buf.data, size, stream);
+	}
 	CHECK_MC(mcMemset(d_buf, opt->write_value, size));
 	CHECK_MC(mcStreamSynchronize(stream));
 
@@ -469,12 +570,12 @@ static void run_test(const struct options *opt)
 			printf("[%lu]", update);
 			if (opt->test_mask & TEST_READ)
 				printf(" READ %.2f GB/s",
-				       measure_read_bandwidth(h_buf.data, d_buf, size,
+				       measure_read_bandwidth(opt, h_buf.data, d_buf, size,
 							      opt->iterations, stream,
 							      start, stop));
 			if (opt->test_mask & TEST_WRITE)
 				printf(" WRITE %.2f GB/s",
-				       measure_write_bandwidth(h_buf.data, d_buf, size,
+				       measure_write_bandwidth(opt, h_buf.data, d_buf, size,
 						       opt->iterations, stream,
 						       start, stop));
 			printf("\n");
@@ -484,11 +585,11 @@ static void run_test(const struct options *opt)
 	} else {
 		if (opt->test_mask & TEST_READ)
 			printf("READ  bandwidth   : %.2f GB/s\n",
-			       measure_read_bandwidth(h_buf.data, d_buf, size,
+			       measure_read_bandwidth(opt, h_buf.data, d_buf, size,
 						      opt->iterations, stream, start, stop));
 		if (opt->test_mask & TEST_WRITE)
 			printf("WRITE bandwidth   : %.2f GB/s\n",
-			       measure_write_bandwidth(h_buf.data, d_buf, size,
+			       measure_write_bandwidth(opt, h_buf.data, d_buf, size,
 						       opt->iterations, stream, start, stop));
 	}
 
