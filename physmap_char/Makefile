@@ -32,8 +32,8 @@ musa: physmap_mc_memtest physmap_mc_memtest_v2p physmap_mc_bwtest register_mm
 physmap_mc_memtest: physmap_mc_memtest.c physmap_ioctl.h
 	$(MXCC) $(CFLAGS) -o $@ physmap_mc_memtest.c
 
-physmap_mc_memtest_v2p: physmap_mc_memtest_v2p.c physmap_ioctl.h
-	$(MXCC) $(CFLAGS) -o $@ physmap_mc_memtest_v2p.c
+physmap_mc_memtest_v2p: physmap_mc_memtest_v2p.c map_va_to_pa.c map_va_to_pa.h physmap_ioctl.h
+	$(MXCC) $(CFLAGS) -o $@ physmap_mc_memtest_v2p.c map_va_to_pa.c
 
 physmap_mc_bwtest: physmap_mc_bwtest.c
 	$(MXCC) $(CFLAGS) -o $@ physmap_mc_bwtest.c
